@@ -1,0 +1,24 @@
+# Main componentst
+google-generativeai>=0.8.0
+chonkie>=0.1.0
+psycopg2-binary>=2.9.0
+pgvector>=0.3.0
+numpy>=1.21.0
+sqlalchemy[asyncio]
+greenlet
+
+# Torch for embedding models
+torch 
+torchvision
+
+# Document Processing
+pypdf>=3.17.0
+python-docx>=1.0.0
+docx2txt>=0.8
+tiktoken>=0.5.2
+
+# Web Interface
+streamlit>=1.31.0
+
+# Environment and Utilities
+python-dotenv>=1.0.0
