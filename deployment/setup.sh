@@ -30,3 +30,4 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Exit
 \q
 EOF
+

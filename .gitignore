@@ -1,1 +1,8 @@
-./deployment/.env
+# Environment files
+*.env
+.env*
+!.env.example
+
+# Deployment specific
+deployment/.env*
+!deployment/.env.example
