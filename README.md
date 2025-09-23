@@ -1,0 +1,1 @@
+bash deployment/setup.sh

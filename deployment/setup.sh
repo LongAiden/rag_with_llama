@@ -7,7 +7,7 @@ source deployment/.env
 brew install postgresql pgvector
 
 # Install Python requirements
-pip install -r requirements.txt
+pip install -r deployment/requirements.txt
 
 # Start
 brew services start postgresql
@@ -15,14 +15,14 @@ brew services start postgresql
 # Create database and user
 psql postgres << EOF
 -- Create database
-CREATE DATABASE rag_db;
+CREATE DATABASE $POSTGRES_DB;
 
 -- Create user from environment variables
 CREATE USER $POSTGRES_USER WITH PASSWORD '$POSTGRES_PASSWORD';
-GRANT ALL PRIVILEGES ON DATABASE rag_db TO $POSTGRES_USER;
+GRANT ALL PRIVILEGES ON DATABASE $POSTGRES_DB TO $POSTGRES_USER;
 
 -- Connect to the database
-\c rag_db
+\c $POSTGRES_DB
 
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -30,4 +30,6 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Exit
 \q
 EOF
+
+
 
