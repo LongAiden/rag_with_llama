@@ -123,7 +123,7 @@ def main():
     semantic_chunks = chunk_with_semantic_chunker(
         text,
         chunk_size=512,
-        similarity_threshold=0.5,
+        similarity_threshold=0.7,
         embedding_model=embedding_model_name
     )
     save_chunks_to_file(
