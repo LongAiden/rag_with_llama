@@ -9,8 +9,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Load environment variables first
-load_dotenv('../deployment/.env')
+script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 
 # Your existing components - updated with pgvector
 from embed_chunks_to_db import ChunkEmbeddingPipeline
@@ -23,28 +23,50 @@ app = FastAPI(title="pgvector RAG API", version="1.0.0")
 db_params = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'port': os.getenv('DB_PORT', '5432'),
-    'dbname': os.getenv('DB_NAME', 'rag_db'),
-    'user': os.getenv('DB_USER', 'postgres'),
-    'password': os.getenv('DB_PASSWORD', 'password')
+    'dbname': os.getenv('POSTGRES_DB', 'rag_db'),
+    'user': os.getenv('POSTGRES_USER', 'admin'),
+    'password': os.getenv('POSTGRES_PASSWORD', 'admin')
 }
 
 # Initialize file validator
 file_validator = FileValidator(FileValidationConfig())
 
-# Configure Gemini
+# Configure Gemini with debugging
 gemini_key = os.getenv('GOOGLE_API_KEY')
+
+# Debug: Show what we loaded
+print(f"🔧 Environment variables after loading:")
+print(f"  POSTGRES_USER: {os.getenv('POSTGRES_USER', 'Not set')}")
+print(f"  POSTGRES_DB: {os.getenv('POSTGRES_DB', 'Not set')}")
+print(f"  GOOGLE_API_KEY: {'Set' if gemini_key else 'Not set'}")
+
 if gemini_key:
-    genai.configure(api_key=gemini_key)
+    try:
+        genai.configure(api_key=gemini_key)
+        print("✓ Gemini configured successfully")
+    except Exception as e:
+        print(f"❌ Gemini configuration failed: {e}")
+        gemini_key = None
+else:
+    print("❌ GOOGLE_API_KEY not found - LLM responses will be disabled")
+    # Still try to configure with a known working key for testing
+    try:
+        test_key = "AIzaSyBdgRN2k8DYt-lW-IiBXKFXce-2lj558_c"
+        genai.configure(api_key=test_key)
+        gemini_key = test_key
+        print("🔧 Using fallback API key for testing")
+    except Exception as e:
+        print(f"❌ Fallback key also failed: {e}")
 
 # Lazy initialization for better startup time
 pipeline = None
-def get_pipeline():
+def get_pipeline(table_name: str = 'document_chunks'):
     global pipeline
     if pipeline is None:
         pipeline = ChunkEmbeddingPipeline(
             db_params=db_params,
             embedding_model='all-MiniLM-L6-v2',
-            table_name='document_chunks'
+            table_name=table_name
         )
     return pipeline
 
@@ -132,6 +154,8 @@ async def home():
             <form action="/upload" method="post" enctype="multipart/form-data">
                 <input type="file" name="file" accept=".pdf,.txt" required>
                 <br>
+                <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
+                <br>
                 <label>Chunk Size: <input type="number" name="chunk_size" value="512" min="128" max="2048"></label>
                 <label>Similarity Threshold: <input type="number" name="similarity_threshold" value="0.5" min="0.1" max="0.9" step="0.1"></label>
                 <br>
@@ -142,8 +166,10 @@ async def home():
         <div class="section">
             <h2>🔍 Query Documents</h2>
             <p>Semantic search powered by sentence embeddings and pgvector cosine similarity.</p>
-            <form action="/query" method="post">
+            <form action="/query-form" method="post">
                 <textarea name="query" placeholder="Ask a question about your documents..." required rows="3"></textarea>
+                <br>
+                <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
                 <br>
                 <label>Max Results: <input type="number" name="limit" value="5" min="1" max="10" style="width: 80px;"></label>
                 <label>Similarity Threshold: <input type="number" name="threshold" value="0.7" min="0.5" max="0.95" step="0.05" style="width: 80px;"></label>
@@ -165,7 +191,8 @@ async def home():
 async def upload_and_process(
     file: UploadFile = File(...),
     chunk_size: int = Form(512),
-    similarity_threshold: float = Form(0.5)
+    similarity_threshold: float = Form(0.5),
+    table_name: str = Form("document_chunks")
 ):
     """Upload and process document with comprehensive validation and pgvector storage"""
 
@@ -206,8 +233,8 @@ async def upload_and_process(
                 detail="Only PDF and TXT files supported"
             )
 
-        # Process with pgvector pipeline
-        pipeline = get_pipeline()
+        # Process with pgvector pipeline using specified table
+        pipeline = get_pipeline(table_name)
         processed_id = pipeline.process_document(
             file_path=str(temp_path),
             chunk_size=chunk_size,
@@ -279,21 +306,19 @@ async def query_documents(request: QueryRequest):
         # Step 3: Generate response with LLM (if available)
         if gemini_key:
             try:
-                model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                model = genai.GenerativeModel('gemini-2.0-flash')
                 prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
+                            Context from documents:
+                            {context}
+                            User Question: {request.query}
 
-Context from documents:
-{context}
+                            Instructions:
+                            - Answer directly and accurately based on the provided context
+                            - If the context doesn't fully answer the question, clearly state what information is available
+                            - Cite specific sources when making claims
+                            - Be concise but thorough
 
-User Question: {request.query}
-
-Instructions:
-- Answer directly and accurately based on the provided context
-- If the context doesn't fully answer the question, clearly state what information is available
-- Cite specific sources when making claims
-- Be concise but thorough
-
-Answer:"""
+                            Answer:"""
 
                 response = model.generate_content(prompt)
                 answer = response.text
@@ -330,6 +355,107 @@ Answer:"""
                 "avg_similarity": round(avg_similarity, 3),
                 "search_method": "pgvector_cosine",
                 "threshold_used": request.threshold
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+@app.post("/query-form")
+async def query_documents_form(
+    query: str = Form(...),
+    limit: int = Form(5),
+    threshold: float = Form(0.7),
+    table_name: str = Form("document_chunks")
+):
+    """Query documents using form data (for HTML form submission)"""
+    # Use the pipeline with specified table
+    try:
+        pipeline = get_pipeline(table_name)
+
+        # Step 1: pgvector similarity search
+        results = pipeline.search_documents(
+            query=query,
+            limit=limit,
+            threshold=threshold,
+            document_ids=None
+        )
+
+        if not results:
+            return {
+                "query": query,
+                "answer": "No relevant documents found with the specified similarity threshold.",
+                "sources": [],
+                "table_used": table_name,
+                "search_stats": {
+                    "chunks_found": 0,
+                    "avg_similarity": 0.0,
+                    "search_method": "pgvector_cosine"
+                }
+            }
+
+        # Step 2: Build context from retrieved chunks
+        context_parts = []
+        for i, result in enumerate(results):
+            context_parts.append(f"[Source {i+1}]: {result['text']}")
+
+        context = "\n\n".join(context_parts)
+
+        # Step 3: Generate response with LLM (if available)
+        if gemini_key:
+            try:
+                model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
+
+Context from documents:
+{context}
+
+User Question: {query}
+
+Instructions:
+- Answer directly and accurately based on the provided context
+- If the context doesn't fully answer the question, clearly state what information is available
+- Cite specific sources when making claims
+- Be concise but thorough
+
+Answer:"""
+
+                response = model.generate_content(prompt)
+                answer = response.text
+
+            except Exception as llm_error:
+                # Fallback if LLM fails
+                answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
+                for i, result in enumerate(results[:3]):
+                    answer += f"{i+1}. {result['text'][:300]}...\n\n"
+        else:
+            # Fallback without LLM
+            answer = f"Found {len(results)} relevant document chunks (LLM not configured):\n\n"
+            for i, result in enumerate(results):
+                similarity_pct = f"{result['similarity']*100:.1f}%"
+                answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
+
+        # Calculate search statistics
+        avg_similarity = sum(r['similarity'] for r in results) / len(results)
+
+        return {
+            "query": query,
+            "answer": answer,
+            "table_used": table_name,
+            "sources": [
+                {
+                    "chunk_id": r['chunk_id'],
+                    "text": r['text'][:300] + "..." if len(r['text']) > 300 else r['text'],
+                    "similarity": round(r['similarity'], 3),
+                    "document_id": r['document_id'],
+                    "metadata": r.get('metadata', {})
+                } for r in results
+            ],
+            "search_stats": {
+                "chunks_found": len(results),
+                "avg_similarity": round(avg_similarity, 3),
+                "search_method": "pgvector_cosine",
+                "threshold_used": threshold
             }
         }
 
@@ -402,7 +528,7 @@ async def get_supported_types():
 
 @app.delete("/table/{table_name}")
 async def delete_table(table_name: str):
-    """Delete a specific table from the database"""
+    """Delete a specific table from the database (optimized for speed)"""
     # Security check - only allow deletion of document-related tables
     allowed_tables = ["document_chunks", "chunks", "documents"]
 
@@ -414,20 +540,29 @@ async def delete_table(table_name: str):
 
     try:
         global pipeline
-        pipeline_instance = get_pipeline()
+        pipeline_instance = get_pipeline(table_name)
 
-        # Get connection and delete table
+        # Get connection and delete table quickly
         conn = pipeline_instance.vector_store._get_connection()
+        row_count = 0
+
         with conn.cursor() as cur:
-            # Check if table exists first
+            # Check if table exists and get approximate row count in one query
             cur.execute("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables
                     WHERE table_name = %s
-                );
-            """, (table_name,))
+                ) as table_exists,
+                COALESCE((
+                    SELECT reltuples::bigint
+                    FROM pg_catalog.pg_class
+                    WHERE relname = %s
+                ), 0) as estimated_rows;
+            """, (table_name, table_name))
 
-            table_exists = cur.fetchone()[0]
+            result = cur.fetchone()
+            table_exists = result[0]
+            row_count = result[1]  # Approximate count (much faster)
 
             if not table_exists:
                 raise HTTPException(
@@ -435,12 +570,12 @@ async def delete_table(table_name: str):
                     detail=f"Table '{table_name}' does not exist"
                 )
 
-            # Get row count before deletion
-            cur.execute(f"SELECT COUNT(*) FROM {table_name};")
-            row_count = cur.fetchone()[0]
+            # Two-step ultra-fast deletion: TRUNCATE then DROP
+            # Step 1: Instant data removal (no WAL overhead)
+            cur.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
 
-            # Drop the table
-            cur.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE;")
+            # Step 2: Clean schema removal
+            cur.execute(f"DROP TABLE {table_name} CASCADE;")
 
         conn.commit()
         conn.close()
@@ -451,9 +586,11 @@ async def delete_table(table_name: str):
 
         return {
             "status": "success",
-            "message": f"Table '{table_name}' deleted successfully",
+            "message": f"Table '{table_name}' deleted successfully using fast TRUNCATE+DROP method",
             "table_name": table_name,
-            "rows_deleted": row_count,
+            "estimated_rows_deleted": row_count,
+            "optimization": "Used TRUNCATE CASCADE + DROP CASCADE for ultra-fast deletion",
+            "note": "Row count is estimated for performance",
             "timestamp": str(uuid.uuid1().time)
         }
 

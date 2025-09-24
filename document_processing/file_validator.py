@@ -218,33 +218,3 @@ class FileValidator:
             List of FileValidationResult objects
         """
         return [self.validate_file(file_path) for file_path in file_paths]
-
-
-def main():
-    """Command-line interface for file validation."""
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python file_validator.py <file_path> [file_path2] ...")
-        sys.exit(1)
-
-    # Create validator with default config
-    validator = FileValidator()
-
-    # Validate files
-    file_paths = sys.argv[1:]
-    results = validator.validate_files(file_paths)
-
-    # Print results
-    for result in results:
-        print(f"\nFile: {result.filename}")
-        print(f"Type: {result.file_type}")
-        print(f"Valid: {result.is_valid}")
-        print(f"Size: {result.file_size} bytes")
-        print(f"MIME Type: {result.mime_type}")
-        if result.error_message:
-            print(f"Error: {result.error_message}")
-
-
-if __name__ == "__main__":
-    main()
