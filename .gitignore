@@ -6,3 +6,13 @@
 # Deployment specific
 deployment/.env*
 !deployment/.env.example
+
+# IDE settings
+.vscode/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+document_processing/__pycache__/
