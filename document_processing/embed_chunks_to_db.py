@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-Embed Chunks and Insert to RAG Database
-This script embeds text chunks and inserts them into a PostgreSQL database with pgvector.
-
-Features:
-- Load chunks from various sources (files, direct text)
-- Generate embeddings using SentenceTransformers
-- Insert chunks with embeddings into PostgreSQL with pgvector
-- Support for metadata storage
-- Batch processing for efficiency
-
-Requirements:
-- pip install psycopg2-binary pgvector sentence-transformers chonkie PyPDF2
-"""
-
 import sys
 from pgvector.psycopg2 import register_vector
 import PyPDF2

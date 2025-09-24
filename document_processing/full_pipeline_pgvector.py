@@ -1,14 +1,20 @@
 import os
 import uuid
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
+import tempfile
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv('../deployment/.env')
 
 # Your existing components - updated with pgvector
 from embed_chunks_to_db import ChunkEmbeddingPipeline
+from file_validator import FileValidator, FileValidationConfig
 import google.generativeai as genai
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
@@ -22,6 +28,14 @@ db_params = {
     'password': os.getenv('DB_PASSWORD', 'password')
 }
 
+# Initialize file validator
+file_validator = FileValidator(FileValidationConfig())
+
+# Configure Gemini
+gemini_key = os.getenv('GOOGLE_API_KEY')
+if gemini_key:
+    genai.configure(api_key=gemini_key)
+
 # Lazy initialization for better startup time
 pipeline = None
 def get_pipeline():
@@ -33,11 +47,6 @@ def get_pipeline():
             table_name='document_chunks'
         )
     return pipeline
-
-# Configure Gemini
-gemini_key = os.getenv('GEMINI_API_KEY')
-if gemini_key:
-    genai.configure(api_key=gemini_key)
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
@@ -158,33 +167,45 @@ async def upload_and_process(
     chunk_size: int = Form(512),
     similarity_threshold: float = Form(0.5)
 ):
-    """Upload and process document with pgvector storage"""
-    
-    # Validate file type
-    if file.content_type not in ['application/pdf', 'text/plain']:
-        raise HTTPException(
-            status_code=400, 
-            detail="Only PDF and TXT files supported"
-        )
-    
-    # Validate parameters
+    """Upload and process document with comprehensive validation and pgvector storage"""
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Validate parameters first
     if not (128 <= chunk_size <= 2048):
         raise HTTPException(status_code=400, detail="Chunk size must be between 128-2048")
     if not (0.1 <= similarity_threshold <= 0.9):
         raise HTTPException(status_code=400, detail="Similarity threshold must be between 0.1-0.9")
-    
+
     # Generate unique document ID
     document_id = str(uuid.uuid4())
     temp_dir = Path("temp_uploads")
     temp_dir.mkdir(exist_ok=True)
     temp_path = temp_dir / f"{document_id}_{file.filename}"
-    
+
     try:
-        # Write temporary file
+        # Write temporary file for validation
         content = await file.read()
         with open(temp_path, "wb") as f:
             f.write(content)
-        
+
+        # Comprehensive file validation using FileValidator
+        validation_result = file_validator.validate_file(str(temp_path))
+
+        if not validation_result.is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File validation failed: {validation_result.error_message}"
+            )
+
+        # Additional content type check
+        if file.content_type not in ['application/pdf', 'text/plain']:
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF and TXT files supported"
+            )
+
         # Process with pgvector pipeline
         pipeline = get_pipeline()
         processed_id = pipeline.process_document(
@@ -195,24 +216,26 @@ async def upload_and_process(
             metadata={
                 'filename': file.filename,
                 'content_type': file.content_type,
-                'upload_timestamp': str(uuid.uuid1().time)
+                'file_size': validation_result.file_size,
+                'mime_type': validation_result.mime_type,
+                'upload_timestamp': str(uuid.uuid1().time),
+                'validation_passed': True
             }
         )
-        
-        # Get chunk count for response
-        stats = pipeline.get_stats()
-        
+
         return UploadResponse(
             status="success",
             document_id=processed_id,
             filename=file.filename,
-            message=f"Document processed and stored in pgvector database",
+            message=f"Document validated and processed successfully with pgvector storage",
             chunks_created=None  # Could query this if needed
         )
-        
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Processing failed: {str(e)}"
         )
     finally:
@@ -222,10 +245,10 @@ async def upload_and_process(
 @app.post("/query")
 async def query_documents(request: QueryRequest):
     """Query documents using pgvector similarity search + LLM generation"""
-    
+
     try:
         pipeline = get_pipeline()
-        
+
         # Step 1: pgvector similarity search
         results = pipeline.search_documents(
             query=request.query,
@@ -233,7 +256,7 @@ async def query_documents(request: QueryRequest):
             threshold=request.threshold,
             document_ids=request.document_ids
         )
-        
+
         if not results:
             return {
                 "query": request.query,
@@ -245,14 +268,14 @@ async def query_documents(request: QueryRequest):
                     "search_method": "pgvector_cosine"
                 }
             }
-        
+
         # Step 2: Build context from retrieved chunks
         context_parts = []
         for i, result in enumerate(results):
             context_parts.append(f"[Source {i+1}]: {result['text']}")
-        
+
         context = "\n\n".join(context_parts)
-        
+
         # Step 3: Generate response with LLM (if available)
         if gemini_key:
             try:
@@ -271,10 +294,10 @@ Instructions:
 - Be concise but thorough
 
 Answer:"""
-                
+
                 response = model.generate_content(prompt)
                 answer = response.text
-                
+
             except Exception as llm_error:
                 # Fallback if LLM fails
                 answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
@@ -286,10 +309,10 @@ Answer:"""
             for i, result in enumerate(results):
                 similarity_pct = f"{result['similarity']*100:.1f}%"
                 answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
-        
+
         # Calculate search statistics
         avg_similarity = sum(r['similarity'] for r in results) / len(results)
-        
+
         return {
             "query": request.query,
             "answer": answer,
@@ -309,6 +332,226 @@ Answer:"""
                 "threshold_used": request.threshold
             }
         }
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+@app.get("/stats")
+async def get_database_stats():
+    """Get database statistics and collection information"""
+    try:
+        pipeline = get_pipeline()
+        stats = pipeline.get_stats()
+        return {
+            "status": "success",
+            "database_stats": stats,
+            "vector_store": {
+                "embedding_model": pipeline.embedding_generator.model_name,
+                "embedding_dimension": pipeline.embedding_generator.embedding_dim,
+                "table_name": pipeline.vector_store.table_name
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint to verify system status"""
+    try:
+        pipeline = get_pipeline()
+        stats = pipeline.get_stats()
+
+        # Check database connection
+        db_status = "healthy" if stats['total_chunks'] >= 0 else "error"
+
+        return {
+            "status": "healthy",
+            "timestamp": str(uuid.uuid1().time),
+            "components": {
+                "database": db_status,
+                "embedding_model": "loaded",
+                "vector_store": "operational"
+            },
+            "metrics": {
+                "total_documents": stats['total_documents'],
+                "total_chunks": stats['total_chunks']
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": str(uuid.uuid1().time)
+        }
+
+@app.get("/supported-types")
+async def get_supported_types():
+    """Get information about supported file types and validation config"""
+    return {
+        "supported_extensions": file_validator.config.allowed_extensions,
+        "max_file_size_mb": file_validator.config.max_file_size_mb,
+        "supported_types": ["pdf", "txt"],
+        "mime_types": list(file_validator.mime_type_mapping.keys()),
+        "vector_store_info": {
+            "embedding_model": "all-MiniLM-L6-v2",
+            "database_backend": "PostgreSQL + pgvector",
+            "chunking_method": "semantic_chunking_with_chonkie"
+        }
+    }
+
+@app.delete("/table/{table_name}")
+async def delete_table(table_name: str):
+    """Delete a specific table from the database"""
+    # Security check - only allow deletion of document-related tables
+    allowed_tables = ["document_chunks", "chunks", "documents"]
+
+    if table_name not in allowed_tables:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Deletion of table '{table_name}' not allowed. Allowed tables: {allowed_tables}"
+        )
+
+    try:
+        global pipeline
+        pipeline_instance = get_pipeline()
+
+        # Get connection and delete table
+        conn = pipeline_instance.vector_store._get_connection()
+        with conn.cursor() as cur:
+            # Check if table exists first
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = %s
+                );
+            """, (table_name,))
+
+            table_exists = cur.fetchone()[0]
+
+            if not table_exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Table '{table_name}' does not exist"
+                )
+
+            # Get row count before deletion
+            cur.execute(f"SELECT COUNT(*) FROM {table_name};")
+            row_count = cur.fetchone()[0]
+
+            # Drop the table
+            cur.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE;")
+
+        conn.commit()
+        conn.close()
+
+        # Reset pipeline if we deleted the current table
+        if table_name == pipeline_instance.vector_store.table_name:
+            pipeline = None
+
+        return {
+            "status": "success",
+            "message": f"Table '{table_name}' deleted successfully",
+            "table_name": table_name,
+            "rows_deleted": row_count,
+            "timestamp": str(uuid.uuid1().time)
+        }
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete table '{table_name}': {str(e)}"
+        )
+
+@app.post("/table/{table_name}/recreate")
+async def recreate_table(table_name: str):
+    """Recreate a specific table (delete and reinitialize)"""
+    # Security check - only allow recreation of document-related tables
+    allowed_tables = ["document_chunks", "chunks", "documents"]
+
+    if table_name not in allowed_tables:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Recreation of table '{table_name}' not allowed. Allowed tables: {allowed_tables}"
+        )
+
+    try:
+        global pipeline
+        pipeline_instance = get_pipeline()
+
+        # Get connection
+        conn = pipeline_instance.vector_store._get_connection()
+        old_row_count = 0
+
+        with conn.cursor() as cur:
+            # Check if table exists and get row count
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = %s
+                );
+            """, (table_name,))
+
+            table_exists = cur.fetchone()[0]
+
+            if table_exists:
+                cur.execute(f"SELECT COUNT(*) FROM {table_name};")
+                old_row_count = cur.fetchone()[0]
+
+                # Drop the existing table
+                cur.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE;")
+
+            # Recreate table with proper structure
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                embedding vector(384),  -- Adjust dimension as needed
+                metadata JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Create indexes
+            cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS {table_name}_embedding_idx
+            ON {table_name} USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+            """)
+
+            cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS {table_name}_document_id_idx
+            ON {table_name} (document_id);
+            """)
+
+        conn.commit()
+        conn.close()
+
+        # Reset pipeline if we recreated the current table
+        if table_name == pipeline_instance.vector_store.table_name:
+            pipeline = None
+
+        return {
+            "status": "success",
+            "message": f"Table '{table_name}' recreated successfully",
+            "table_name": table_name,
+            "previous_rows": old_row_count,
+            "current_rows": 0,
+            "timestamp": str(uuid.uuid1().time)
+        }
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to recreate table '{table_name}': {str(e)}"
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
