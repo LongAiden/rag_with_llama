@@ -1,10 +1,11 @@
-#!/bin/bash
-
 # Load environment variables
 source deployment/.env
 
 # Install PostgreSQL via Homebrew
-brew install postgresql pgvector
+brew install postgresql
+
+# Install pgvector via Homebrew
+brew install pgvector
 
 # Install Python requirements
 pip install -r deployment/requirements.txt
@@ -30,6 +31,3 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Exit
 \q
 EOF
-
-
-

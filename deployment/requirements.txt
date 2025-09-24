@@ -1,33 +1,41 @@
-# Main componentst
-google-generativeai>=0.8.0
-chonkie>=0.1.0
+# Core ML Stack - Version Pinned for Stability
+numpy>=1.21.0,<2.0  # Critical: NumPy 2.x breaks binary compatibility
+scipy>=1.10.0,<1.12.0  # Must align with NumPy version
+torch>=2.0.0,<2.5.0
+torchvision>=0.15.0,<0.20.0
+sentence-transformers>=2.2.0
+
+# Vector Database & SQL
 psycopg2-binary>=2.9.0
 pgvector>=0.3.0
-numpy>=1.21.0
-sqlalchemy[asyncio]
-greenlet
+sqlalchemy[asyncio]>=2.0.0
+greenlet>=2.0.0
 
-# Torch for embedding models
-torch 
-torchvision
-
-# Document Processing
+# Document Processing Pipeline
 pypdf>=3.17.0
-PyPDF2
 python-docx>=1.0.0
 docx2txt>=0.8
 tiktoken>=0.5.2
-sentence-transformers
+PyPDF2
 
-# Web Interface
+# Chunking Strategy
+chonkie>=0.1.0
+
+# LLM Integration
+google-generativeai>=0.8.0
+
+# Web Interface & API
 streamlit>=1.31.0
-
-# FastAPI and Pydantic
 fastapi>=0.104.0
 pydantic>=2.5.0
 pydantic-ai>=0.0.7
-uvicorn>=0.24.0
+uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 
-# Environment and Utilities
+# Environment Management
 python-dotenv>=1.0.0
+
+# Production Essentials (Add these)
+gunicorn>=21.2.0  # WSGI server for production
+prometheus-client>=0.19.0  # Metrics collection
+structlog>=23.2.0  # Structured logging

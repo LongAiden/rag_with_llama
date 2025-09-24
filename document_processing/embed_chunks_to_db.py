@@ -14,6 +14,14 @@ Requirements:
 - pip install psycopg2-binary pgvector sentence-transformers chonkie PyPDF2
 """
 
+import sys
+from pgvector.psycopg2 import register_vector
+import PyPDF2
+from chonkie import SemanticChunker
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from psycopg2.extras import execute_values
+import psycopg2
 import os
 import json
 import uuid
@@ -23,14 +31,11 @@ from pathlib import Path
 from dataclasses import dataclass
 import logging
 
-import psycopg2
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from chonkie import SemanticChunker
-import PyPDF2
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 # Import your existing chunking functions
-import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Setup logging
@@ -85,44 +90,106 @@ class EmbeddingGenerator:
 
 
 class VectorStore:
-    """Vector store using your existing add_chunks method interface."""
+    """Vector store using pgvector for efficient similarity search."""
 
     def __init__(self, connection_params: Dict[str, str], table_name: str = "chunks"):
         """
-        Initialize vector store.
+        Initialize vector store with pgvector support.
         Args:
             connection_params: Database connection parameters
             table_name: Name of the chunks table
         """
         self.connection_params = connection_params
         self.table_name = table_name
+        self._initialize_database()
 
     def _get_connection(self):
-        """Get database connection."""
-        return psycopg2.connect(**self.connection_params)
+        """Get database connection with pgvector support."""
+        conn = psycopg2.connect(**self.connection_params)
+        # Register pgvector types
+        register_vector(conn)
+        return conn
 
-    def add_chunks(self, chunks: List[Chunk]):
-        """Add chunks to vector store using your existing method"""
+    def _initialize_database(self):
+        """Initialize database with pgvector extension and table."""
         try:
             conn = self._get_connection()
             with conn.cursor() as cur:
+                # Enable pgvector extension
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
+                # Create table with proper vector column
+                # Assuming 384-dimensional embeddings for all-MiniLM-L6-v2
+                # Adjust dimension based on your model
+                cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.table_name} (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    embedding vector(384),  -- Adjust dimension as needed
+                    metadata JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """)
+
+                # Create index for similarity search
+                cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.table_name}_embedding_idx 
+                ON {self.table_name} USING ivfflat (embedding vector_cosine_ops) 
+                WITH (lists = 100);
+                """)
+
+                # Create index on document_id for filtering
+                cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.table_name}_document_id_idx 
+                ON {self.table_name} (document_id);
+                """)
+
+            conn.commit()
+            conn.close()
+            logger.info(f"Database initialized with table: {self.table_name}")
+
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
+
+    def add_chunks(self, chunks: List[Chunk], batch_size: int = 100):
+        """Add chunks to vector store using batch insert for efficiency."""
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cur:
+                # Prepare data for batch insert
+                chunk_data = []
                 for chunk in chunks:
-                    insert_sql = f"""
-                    INSERT INTO {self.table_name} (id, document_id, text, embedding, metadata)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        document_id = EXCLUDED.document_id,
-                        text = EXCLUDED.text,
-                        embedding = EXCLUDED.embedding,
-                        metadata = EXCLUDED.metadata;
-                    """
-                    cur.execute(insert_sql, (
+                    chunk_data.append((
                         chunk.id,
                         chunk.document_id,
                         chunk.text,
-                        chunk.embedding,
-                        chunk.metadata or {}
+                        # Convert to numpy array for pgvector
+                        np.array(chunk.embedding),
+                        json.dumps(
+                            chunk.metadata) if chunk.metadata else json.dumps({})
                     ))
+
+                # Use execute_values for efficient batch insert
+                insert_sql = f"""
+                INSERT INTO {self.table_name} (id, document_id, text, embedding, metadata)
+                VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    document_id = EXCLUDED.document_id,
+                    text = EXCLUDED.text,
+                    embedding = EXCLUDED.embedding,
+                    metadata = EXCLUDED.metadata;
+                """
+
+                # Process in batches
+                for i in range(0, len(chunk_data), batch_size):
+                    batch = chunk_data[i:i + batch_size]
+                    execute_values(
+                        cur, insert_sql, batch,
+                        template=None, page_size=batch_size
+                    )
+
             conn.commit()
             conn.close()
             logger.info(f"Added {len(chunks)} chunks to vector store")
@@ -132,14 +199,16 @@ class VectorStore:
             raise
 
     def search_similar_chunks(self, query_embedding: List[float],
-                              limit: int = 5, threshold: float = 0.7) -> List[Dict]:
+                              limit: int = 5, threshold: float = 0.7,
+                              document_ids: Optional[List[str]] = None) -> List[Dict]:
         """
-        Search for similar chunks using cosine similarity.
+        Search for similar chunks using pgvector cosine similarity.
 
         Args:
             query_embedding: Query embedding vector
             limit: Maximum number of results
-            threshold: Similarity threshold
+            threshold: Similarity threshold (0-1, higher = more similar)
+            document_ids: Optional list of document IDs to filter by
 
         Returns:
             List of similar chunks with metadata
@@ -147,25 +216,41 @@ class VectorStore:
         try:
             conn = self._get_connection()
             with conn.cursor() as cursor:
-                cursor.execute(f"""
+                # Convert query embedding to numpy array
+                query_vector = np.array(query_embedding)
+
+                # Build query with optional document filtering
+                base_query = f"""
                     SELECT
                         id,
                         text,
                         metadata,
                         document_id,
-                        (1 - (embedding <=> %s::vector)) as similarity
+                        (1 - (embedding <=> %s)) as similarity
                     FROM {self.table_name}
-                    WHERE (1 - (embedding <=> %s::vector)) >= %s
-                    ORDER BY embedding <=> %s::vector
+                    WHERE (1 - (embedding <=> %s)) >= %s
+                """
+
+                params = [query_vector, query_vector, threshold]
+
+                if document_ids:
+                    base_query += " AND document_id = ANY(%s)"
+                    params.append(document_ids)
+
+                base_query += """
+                    ORDER BY embedding <=> %s
                     LIMIT %s
-                """, (query_embedding, query_embedding, threshold, query_embedding, limit))
+                """
+                params.extend([query_vector, limit])
+
+                cursor.execute(base_query, params)
 
                 results = []
                 for row in cursor.fetchall():
                     results.append({
                         'chunk_id': row[0],
                         'text': row[1],
-                        'metadata': row[2],
+                        'metadata': row[2] if isinstance(row[2], (dict, type(None))) else json.loads(row[2]),
                         'document_id': row[3],
                         'similarity': float(row[4])
                     })
@@ -177,12 +262,59 @@ class VectorStore:
             logger.error(f"Error searching chunks: {e}")
             raise
 
+    def delete_document_chunks(self, document_id: str) -> int:
+        """Delete all chunks for a specific document."""
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM {self.table_name} WHERE document_id = %s", (document_id,))
+                deleted_count = cur.rowcount
+            conn.commit()
+            conn.close()
+            logger.info(
+                f"Deleted {deleted_count} chunks for document: {document_id}")
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting document chunks: {e}")
+            raise
+
+    def get_collection_stats(self) -> Dict[str, Any]:
+        """Get statistics about the vector store."""
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                SELECT 
+                    COUNT(*) as total_chunks,
+                    COUNT(DISTINCT document_id) as total_documents,
+                    AVG(LENGTH(text)) as avg_text_length,
+                    MIN(created_at) as earliest_chunk,
+                    MAX(created_at) as latest_chunk
+                FROM {self.table_name}
+                """)
+
+                row = cur.fetchone()
+                stats = {
+                    'total_chunks': row[0],
+                    'total_documents': row[1],
+                    'avg_text_length': float(row[2]) if row[2] else 0,
+                    'earliest_chunk': row[3].isoformat() if row[3] else None,
+                    'latest_chunk': row[4].isoformat() if row[4] else None
+                }
+
+            conn.close()
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting stats: {e}")
+            raise
+
 
 class ChunkEmbeddingPipeline:
     """Complete pipeline for chunking documents and storing embeddings."""
 
-    def __init__(self, db_params: Dict[str, str], embedding_model: str = 'all-MiniLM-L6-v2',
-                 table_name: str = "chunks"):
+    def __init__(self, db_params: Dict[str, str], embedding_model: str,
+                 table_name: str):
         """
         Initialize the pipeline.
 
@@ -285,6 +417,7 @@ class ChunkEmbeddingPipeline:
                 'chunk_size': chunk_size,
                 'similarity_threshold': similarity_threshold,
                 'embedding_model': self.embedding_generator.model_name,
+                'embedding_dimension': len(embedding),
                 'filename': filename,
                 'file_type': file_type,
                 'file_size': file_size
@@ -303,95 +436,37 @@ class ChunkEmbeddingPipeline:
             )
             chunk_objects.append(chunk_obj)
 
-        # Use your add_chunks method
-        print("Inserting chunks into database using add_chunks method...")
+        # Use your add_chunks method with pgvector
+        print("Inserting chunks into database using pgvector...")
         self.vector_store.add_chunks(chunk_objects)
 
         print(
             f"Successfully processed {filename} -> Document ID: {document_id}")
         return document_id
 
-    def search_documents(self, query: str, limit: int = 5, threshold: float = 0.7) -> List[Dict]:
+    def search_documents(self, query: str, limit: int = 5, threshold: float = 0.7,
+                         document_ids: Optional[List[str]] = None) -> List[Dict]:
         """
-        Search for relevant document chunks.
+        Search for relevant document chunks using pgvector.
 
         Args:
             query: Search query
             limit: Maximum number of results
             threshold: Similarity threshold
+            document_ids: Optional list of document IDs to filter by
 
         Returns:
             List of relevant chunks
         """
         query_embedding = self.embedding_generator.embed_text(query)
-        return self.vector_store.search_similar_chunks(query_embedding, limit, threshold)
+        return self.vector_store.search_similar_chunks(
+            query_embedding, limit, threshold, document_ids
+        )
 
+    def delete_document(self, document_id: str) -> int:
+        """Delete all chunks for a document."""
+        return self.vector_store.delete_document_chunks(document_id)
 
-def main():
-    """Example usage of the chunk embedding pipeline."""
-
-    # Database connection parameters
-    db_params = {
-        'host': 'localhost',
-        'port': '5432',
-        'dbname': 'rag_db',
-        'user': 'admin',  # Replace with your DB user
-        'password': 'your_password'  # Replace with your DB password
-    }
-
-    # Initialize pipeline
-    pipeline = ChunkEmbeddingPipeline(
-        db_params=db_params,
-        embedding_model='all-MiniLM-L6-v2',
-        table_name='chunks'  # Your existing table name
-    )
-
-    try:
-        # Process the PDF document
-        pdf_path = "../docs/llama2.pdf"
-
-        if os.path.exists(pdf_path):
-            document_id = pipeline.process_document(
-                file_path=pdf_path,
-                chunk_size=512,
-                similarity_threshold=0.5,
-                document_id=None,  # Will generate new UUID
-                metadata={
-                    'source': 'llama2_paper',
-                    'processed_by': 'chonkie_pipeline',
-                    'processing_date': datetime.now().isoformat()
-                }
-            )
-
-            print(
-                f"\nDocument processed successfully! Document ID: {document_id}")
-
-            # Test search functionality
-            print("\nTesting search functionality...")
-            query = "What is Llama 2?"
-            results = pipeline.search_documents(query, limit=3, threshold=0.3)
-
-            print(f"\nSearch results for: '{query}'")
-            print("=" * 50)
-            for i, result in enumerate(results, 1):
-                print(
-                    f"\nResult {i} (Similarity: {result['similarity']:.3f}):")
-                print(f"Document ID: {result['document_id']}")
-                print(f"Text: {result['text'][:200]}...")
-                metadata = result.get('metadata', {})
-                if isinstance(metadata, dict) and 'filename' in metadata:
-                    print(f"File: {metadata['filename']}")
-                print("-" * 30)
-
-        else:
-            print(f"PDF file not found: {pdf_path}")
-            print("Please make sure the file exists or update the path.")
-
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-if __name__ == "__main__":
-    main()
+    def get_stats(self) -> Dict[str, Any]:
+        """Get vector store statistics."""
+        return self.vector_store.get_collection_stats()
