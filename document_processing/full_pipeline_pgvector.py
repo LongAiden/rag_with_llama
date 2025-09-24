@@ -33,13 +33,6 @@ file_validator = FileValidator(FileValidationConfig())
 
 # Configure Gemini with debugging
 gemini_key = os.getenv('GOOGLE_API_KEY')
-
-# Debug: Show what we loaded
-print(f"🔧 Environment variables after loading:")
-print(f"  POSTGRES_USER: {os.getenv('POSTGRES_USER', 'Not set')}")
-print(f"  POSTGRES_DB: {os.getenv('POSTGRES_DB', 'Not set')}")
-print(f"  GOOGLE_API_KEY: {'Set' if gemini_key else 'Not set'}")
-
 if gemini_key:
     try:
         genai.configure(api_key=gemini_key)
