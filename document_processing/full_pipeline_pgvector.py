@@ -47,16 +47,6 @@ if gemini_key:
     except Exception as e:
         print(f"❌ Gemini configuration failed: {e}")
         gemini_key = None
-else:
-    print("❌ GOOGLE_API_KEY not found - LLM responses will be disabled")
-    # Still try to configure with a known working key for testing
-    try:
-        test_key = "AIzaSyBdgRN2k8DYt-lW-IiBXKFXce-2lj558_c"
-        genai.configure(api_key=test_key)
-        gemini_key = test_key
-        print("🔧 Using fallback API key for testing")
-    except Exception as e:
-        print(f"❌ Fallback key also failed: {e}")
 
 # Lazy initialization for better startup time
 pipeline = None
@@ -186,6 +176,7 @@ async def home():
     </body>
     </html>
     """
+
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_and_process(
