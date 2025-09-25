@@ -1,5 +1,3 @@
-"""HTML templates for the RAG API"""
-
 HOME_PAGE_HTML = """
 <!DOCTYPE html>
 <html>

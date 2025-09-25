@@ -1,7 +1,3 @@
-"""
-Simple test script for the file validation API.
-"""
-
 import requests
 import tempfile
 import os

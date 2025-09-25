@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-PDF Chunking with Chonkie and Custom Embedding Models
-This script demonstrates how to extract text from a PDF and chunk it using Chonkie
-with custom embedding models for better semantic understanding.
-
-Embedding Model Options:
-- all-MiniLM-L6-v2: Fast, lightweight (384 dimensions)
-- all-mpnet-base-v2: High quality, slower (768 dimensions)
-- multi-qa-mpnet-base-dot-v1: Optimized for question-answering
-- all-distilroberta-v1: Good balance of speed and quality
-
-Requirements:
-- pip install chonkie PyPDF2 sentence-transformers
-"""
-
 import os
 from pathlib import Path
 import PyPDF2
