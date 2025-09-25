@@ -1,3 +1,6 @@
+import google.generativeai as genai
+from file_validator import FileValidator, FileValidationConfig
+from embed_chunks_to_db import ChunkEmbeddingPipeline
 import os
 import uuid
 from pathlib import Path
@@ -13,9 +16,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 
 # Your existing components - updated with pgvector
-from embed_chunks_to_db import ChunkEmbeddingPipeline
-from file_validator import FileValidator, FileValidationConfig
-import google.generativeai as genai
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
@@ -43,6 +43,8 @@ if gemini_key:
 
 # Lazy initialization for better startup time
 pipeline = None
+
+
 def get_pipeline(table_name: str = 'document_chunks'):
     global pipeline
     if pipeline is None:
@@ -53,11 +55,13 @@ def get_pipeline(table_name: str = 'document_chunks'):
         )
     return pipeline
 
+
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
     limit: int = Field(default=5, ge=1, le=20)
     threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     document_ids: Optional[List[str]] = None
+
 
 class UploadResponse(BaseModel):
     status: str
@@ -65,6 +69,7 @@ class UploadResponse(BaseModel):
     filename: str
     message: str
     chunks_created: Optional[int] = None
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -185,9 +190,11 @@ async def upload_and_process(
 
     # Validate parameters first
     if not (128 <= chunk_size <= 2048):
-        raise HTTPException(status_code=400, detail="Chunk size must be between 128-2048")
+        raise HTTPException(
+            status_code=400, detail="Chunk size must be between 128-2048")
     if not (0.1 <= similarity_threshold <= 0.9):
-        raise HTTPException(status_code=400, detail="Similarity threshold must be between 0.1-0.9")
+        raise HTTPException(
+            status_code=400, detail="Similarity threshold must be between 0.1-0.9")
 
     # Generate unique document ID
     document_id = str(uuid.uuid4())
@@ -252,6 +259,7 @@ async def upload_and_process(
     finally:
         # Cleanup temporary file
         temp_path.unlink(missing_ok=True)
+
 
 @app.post("/query")
 async def query_documents(request: QueryRequest):
@@ -344,6 +352,7 @@ async def query_documents(request: QueryRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
 
 @app.post("/query-form")
 async def query_documents_form(
@@ -446,6 +455,7 @@ Answer:"""
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
+
 @app.get("/stats")
 async def get_database_stats():
     """Get database statistics and collection information"""
@@ -462,7 +472,8 @@ async def get_database_stats():
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get stats: {str(e)}")
 
 
 @app.get("/health")
@@ -495,6 +506,7 @@ async def health_check():
             "timestamp": str(uuid.uuid1().time)
         }
 
+
 @app.get("/supported-types")
 async def get_supported_types():
     """Get information about supported file types and validation config"""
@@ -509,6 +521,7 @@ async def get_supported_types():
             "chunking_method": "semantic_chunking_with_chonkie"
         }
     }
+
 
 @app.delete("/table/{table_name}")
 async def delete_table(table_name: str):
@@ -585,6 +598,7 @@ async def delete_table(table_name: str):
             status_code=500,
             detail=f"Failed to delete table '{table_name}': {str(e)}"
         )
+
 
 @app.post("/table/{table_name}/recreate")
 async def recreate_table(table_name: str):
