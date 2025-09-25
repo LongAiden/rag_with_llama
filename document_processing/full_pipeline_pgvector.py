@@ -1,21 +1,25 @@
+import os
+import sys
+import uuid
+from pathlib import Path
+
 import google.generativeai as genai
 from file_validator import FileValidator, FileValidationConfig
 from embed_chunks_to_db import ChunkEmbeddingPipeline
-import os
-import uuid
-from pathlib import Path
-from typing import List, Optional
-import tempfile
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
-from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
+# Add project root to path to import models
 script_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 
-# Your existing components - updated with pgvector
+# Load models
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from models.models import QueryRequest, UploadResponse
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
@@ -54,21 +58,6 @@ def get_pipeline(table_name: str = 'document_chunks'):
             table_name=table_name
         )
     return pipeline
-
-
-class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=1000)
-    limit: int = Field(default=5, ge=1, le=20)
-    threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    document_ids: Optional[List[str]] = None
-
-
-class UploadResponse(BaseModel):
-    status: str
-    document_id: str
-    filename: str
-    message: str
-    chunks_created: Optional[int] = None
 
 
 @app.get("/", response_class=HTMLResponse)

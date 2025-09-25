@@ -1,39 +1,13 @@
+import sys
 import os
 from pathlib import Path
 from typing import List, Optional
-from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator
+# Add project root to path to import models
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-
-class SupportedFileType(str, Enum):
-    PDF = "pdf"
-    DOCX = "docx"
-    TXT = "txt"
-
-
-class FileValidationResult(BaseModel):
-    """Result of file validation."""
-    filename: str
-    file_type: Optional[SupportedFileType]
-    is_valid: bool
-    file_size: int = Field(description="File size in bytes")
-    error_message: Optional[str] = None
-
-
-class FileValidationConfig(BaseModel):
-    """Configuration for file validation."""
-    max_file_size_mb: int = Field(
-        default=50, description="Maximum file size in MB")
-    allowed_extensions: List[str] = Field(default=[".pdf", ".docx", ".txt"])
-
-    @field_validator('max_file_size_mb')
-    @classmethod
-    def validate_file_size(cls, v):
-        if v <= 0:
-            raise ValueError("Max file size must be positive")
-        return v
-
+from models.models import SupportedFileType, FileValidationResult, FileValidationConfig
 
 class FileValidator:
     """File validator class for checking PDF, DOCX, and TXT files."""
@@ -65,10 +39,8 @@ class FileValidator:
     def validate_file(self, file_path: str) -> FileValidationResult:
         """
         Validate a single file and return validation result.
-
         Args:
             file_path: Path to the file to validate
-
         Returns:
             FileValidationResult with validation details
         """
