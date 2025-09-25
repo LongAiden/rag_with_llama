@@ -9,21 +9,12 @@ import psycopg2
 import os
 import json
 import uuid
-from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dataclasses import dataclass
-import logging
-
-import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 
 # Import your existing chunking functions
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Setup logging
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -131,10 +122,10 @@ class VectorStore:
 
             conn.commit()
             conn.close()
-            logger.info(f"Database initialized with table: {self.table_name}")
+            print(f"Database initialized with table: {self.table_name}")
 
         except Exception as e:
-            logger.error(f"Error initializing database: {e}")
+            print(f"Error initializing database: {e}")
             raise
 
     def add_chunks(self, chunks: List[Chunk], batch_size: int = 100):
@@ -176,10 +167,10 @@ class VectorStore:
 
             conn.commit()
             conn.close()
-            logger.info(f"Added {len(chunks)} chunks to vector store")
+            print(f"Added {len(chunks)} chunks to vector store")
 
         except Exception as e:
-            logger.error(f"Error adding chunks: {e}")
+            print(f"Error adding chunks: {e}")
             raise
 
     def search_similar_chunks(self, query_embedding: List[float],
@@ -243,7 +234,7 @@ class VectorStore:
                 return results
 
         except Exception as e:
-            logger.error(f"Error searching chunks: {e}")
+            print(f"Error searching chunks: {e}")
             raise
 
     def delete_document_chunks(self, document_id: str) -> int:
@@ -256,11 +247,11 @@ class VectorStore:
                 deleted_count = cur.rowcount
             conn.commit()
             conn.close()
-            logger.info(
+            print(
                 f"Deleted {deleted_count} chunks for document: {document_id}")
             return deleted_count
         except Exception as e:
-            logger.error(f"Error deleting document chunks: {e}")
+            print(f"Error deleting document chunks: {e}")
             raise
 
     def get_collection_stats(self) -> Dict[str, Any]:
@@ -290,7 +281,7 @@ class VectorStore:
             conn.close()
             return stats
         except Exception as e:
-            logger.error(f"Error getting stats: {e}")
+            print(f"Error getting stats: {e}")
             raise
 
 

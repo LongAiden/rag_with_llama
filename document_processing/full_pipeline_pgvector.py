@@ -6,163 +6,185 @@ from pathlib import Path
 import google.generativeai as genai
 from file_validator import FileValidator, FileValidationConfig
 from embed_chunks_to_db import ChunkEmbeddingPipeline
+from templates import HOME_PAGE_HTML
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
-# Add project root to path to import models
+# Configuration setup
 script_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 
-# Load models
+# Add project root to path for models
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from models.models import QueryRequest, UploadResponse
 
+# Constants
+DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI 
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
+CHUNK_SIZE_LIMITS = (128, 2048)
+SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
+ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
+ALLOWED_TABLES = ["document_chunks", "chunks", "documents"]
+
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
-# Initialize once at startup
-db_params = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'port': os.getenv('DB_PORT', '5432'),
-    'dbname': os.getenv('POSTGRES_DB', 'rag_db'),
-    'user': os.getenv('POSTGRES_USER', 'admin'),
-    'password': os.getenv('POSTGRES_PASSWORD', 'admin')
-}
+# Global configuration
+class AppConfig:
+    def __init__(self):
+        self.db_params = {
+            'host': os.getenv('DB_HOST', 'localhost'),
+            'port': os.getenv('DB_PORT', '5432'),
+            'dbname': os.getenv('POSTGRES_DB', 'rag_db'),
+            'user': os.getenv('POSTGRES_USER', 'admin'),
+            'password': os.getenv('POSTGRES_PASSWORD', 'admin')
+        }
+        self.file_validator = FileValidator(FileValidationConfig())
+        self.gemini_key = self._configure_gemini()
+        self.pipeline = None
 
-# Initialize file validator
-file_validator = FileValidator(FileValidationConfig())
+    def _configure_gemini(self):
+        gemini_key = os.getenv('GOOGLE_API_KEY')
+        if gemini_key:
+            try:
+                genai.configure(api_key=gemini_key)
+                print("✓ Gemini configured successfully")
+                return gemini_key
+            except Exception as e:
+                print(f"❌ Gemini configuration failed: {e}")
+        return None
 
-# Configure Gemini with debugging
-gemini_key = os.getenv('GOOGLE_API_KEY')
-if gemini_key:
-    try:
-        genai.configure(api_key=gemini_key)
-        print("✓ Gemini configured successfully")
-    except Exception as e:
-        print(f"❌ Gemini configuration failed: {e}")
-        gemini_key = None
-
-# Lazy initialization for better startup time
-pipeline = None
+config = AppConfig()
 
 
-def get_pipeline(table_name: str = 'document_chunks'):
-    global pipeline
-    if pipeline is None:
-        pipeline = ChunkEmbeddingPipeline(
-            db_params=db_params,
-            embedding_model='all-MiniLM-L6-v2',
+def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
+    if config.pipeline is None or config.pipeline.vector_store.table_name != table_name:
+        config.pipeline = ChunkEmbeddingPipeline(
+            db_params=config.db_params,
+            embedding_model=DEFAULT_EMBEDDING_MODEL,
             table_name=table_name
         )
-    return pipeline
+    return config.pipeline
+
+
+def validate_upload_params(chunk_size: int, similarity_threshold: float, content_type: str):
+    """Validate upload parameters"""
+    if not (CHUNK_SIZE_LIMITS[0] <= chunk_size <= CHUNK_SIZE_LIMITS[1]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chunk size must be between {CHUNK_SIZE_LIMITS[0]}-{CHUNK_SIZE_LIMITS[1]}"
+        )
+    if not (SIMILARITY_THRESHOLD_LIMITS[0] <= similarity_threshold <= SIMILARITY_THRESHOLD_LIMITS[1]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Similarity threshold must be between {SIMILARITY_THRESHOLD_LIMITS[0]}-{SIMILARITY_THRESHOLD_LIMITS[1]}"
+        )
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and TXT files supported"
+        )
+
+
+def generate_llm_response(query: str, context: str, results: list) -> str:
+    """Generate LLM response using Gemini or fallback"""
+    if config.gemini_key:
+        try:
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
+
+Context from documents:
+{context}
+
+User Question: {query}
+
+Instructions:
+- Answer directly and accurately based on the provided context
+- If the context doesn't fully answer the question, clearly state what information is available
+- Cite specific sources when making claims
+- Be concise but thorough
+
+Answer:"""
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as llm_error:
+            # Fallback if LLM fails
+            answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
+            for i, result in enumerate(results[:3]):
+                answer += f"{i+1}. {result['text'][:300]}...\n\n"
+            return answer
+    else:
+        # Fallback without LLM
+        answer = f"Found {len(results)} relevant document chunks (LLM not configured):\n\n"
+        for i, result in enumerate(results):
+            similarity_pct = f"{result['similarity']*100:.1f}%"
+            answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
+        return answer
+
+
+def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
+    """Common document search logic"""
+    pipeline = get_pipeline(table_name)
+
+    # Step 1: pgvector similarity search
+    results = pipeline.search_documents(
+        query=query,
+        limit=limit,
+        threshold=threshold,
+        document_ids=document_ids
+    )
+
+    if not results:
+        return {
+            "query": query,
+            "answer": "No relevant documents found with the specified similarity threshold.",
+            "sources": [],
+            "table_used": table_name,
+            "search_stats": {
+                "chunks_found": 0,
+                "avg_similarity": 0.0,
+                "search_method": "pgvector_cosine"
+            }
+        }
+
+    # Step 2: Build context from retrieved chunks
+    context_parts = [f"[Source {i+1}]: {result['text']}" for i, result in enumerate(results)]
+    context = "\n\n".join(context_parts)
+
+    # Step 3: Generate response with LLM
+    answer = generate_llm_response(query, context, results)
+
+    # Calculate search statistics
+    avg_similarity = sum(r['similarity'] for r in results) / len(results)
+
+    return {
+        "query": query,
+        "answer": answer,
+        "table_used": table_name,
+        "sources": [
+            {
+                "chunk_id": r['chunk_id'],
+                "text": r['text'][:300] + "..." if len(r['text']) > 300 else r['text'],
+                "similarity": round(r['similarity'], 3),
+                "document_id": r['document_id'],
+                "metadata": r.get('metadata', {})
+            } for r in results
+        ],
+        "search_stats": {
+            "chunks_found": len(results),
+            "avg_similarity": round(avg_similarity, 3),
+            "search_method": "pgvector_cosine",
+            "threshold_used": threshold
+        }
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>pgvector RAG System</title>
-        <style>
-            body { 
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-                max-width: 800px; 
-                margin: 50px auto; 
-                padding: 20px;
-                background: #f8f9fa;
-            }
-            .section { 
-                margin: 30px 0; 
-                padding: 25px; 
-                background: white;
-                border-radius: 12px; 
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            input, textarea { 
-                margin: 10px 0; 
-                padding: 12px; 
-                width: 100%; 
-                box-sizing: border-box; 
-                border: 2px solid #e9ecef;
-                border-radius: 6px;
-                font-size: 14px;
-            }
-            input:focus, textarea:focus {
-                outline: none;
-                border-color: #007bff;
-            }
-            button { 
-                background: linear-gradient(135deg, #007bff, #0056b3);
-                color: white; 
-                padding: 12px 24px; 
-                border: none; 
-                border-radius: 6px; 
-                cursor: pointer; 
-                font-weight: 600;
-                transition: all 0.2s;
-            }
-            button:hover { 
-                transform: translateY(-1px);
-                box-shadow: 0 4px 12px rgba(0,123,255,0.3);
-            }
-            .stats {
-                background: #e3f2fd;
-                padding: 15px;
-                border-radius: 8px;
-                margin: 20px 0;
-            }
-            h1 { color: #2c3e50; }
-            h2 { color: #34495e; margin-bottom: 15px; }
-        </style>
-    </head>
-    <body>
-        <h1>🚀 pgvector RAG System</h1>
-        <div class="stats">
-            <strong>Powered by:</strong> PostgreSQL + pgvector for high-performance similarity search
-        </div>
-        
-        <div class="section">
-            <h2>📤 Upload & Process Document</h2>
-            <p>Supported formats: PDF, TXT. Documents are chunked semantically and stored with vector embeddings.</p>
-            <form action="/upload" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" accept=".pdf,.txt" required>
-                <br>
-                <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
-                <br>
-                <label>Chunk Size: <input type="number" name="chunk_size" value="512" min="128" max="2048"></label>
-                <label>Similarity Threshold: <input type="number" name="similarity_threshold" value="0.5" min="0.1" max="0.9" step="0.1"></label>
-                <br>
-                <button type="submit">Upload & Process</button>
-            </form>
-        </div>
-        
-        <div class="section">
-            <h2>🔍 Query Documents</h2>
-            <p>Semantic search powered by sentence embeddings and pgvector cosine similarity.</p>
-            <form action="/query-form" method="post">
-                <textarea name="query" placeholder="Ask a question about your documents..." required rows="3"></textarea>
-                <br>
-                <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
-                <br>
-                <label>Max Results: <input type="number" name="limit" value="5" min="1" max="10" style="width: 80px;"></label>
-                <label>Similarity Threshold: <input type="number" name="threshold" value="0.7" min="0.5" max="0.95" step="0.05" style="width: 80px;"></label>
-                <br>
-                <button type="submit">Search</button>
-            </form>
-        </div>
-        
-        <div class="section">
-            <h2>📊 System Status</h2>
-            <a href="/stats" target="_blank"><button>View Database Statistics</button></a>
-            <a href="/health" target="_blank"><button>Health Check</button></a>
-        </div>
-    </body>
-    </html>
-    """
+    return HOME_PAGE_HTML
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -177,13 +199,8 @@ async def upload_and_process(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    # Validate parameters first
-    if not (128 <= chunk_size <= 2048):
-        raise HTTPException(
-            status_code=400, detail="Chunk size must be between 128-2048")
-    if not (0.1 <= similarity_threshold <= 0.9):
-        raise HTTPException(
-            status_code=400, detail="Similarity threshold must be between 0.1-0.9")
+    # Validate parameters
+    validate_upload_params(chunk_size, similarity_threshold, file.content_type)
 
     # Generate unique document ID
     document_id = str(uuid.uuid4())
@@ -197,20 +214,12 @@ async def upload_and_process(
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        # Comprehensive file validation using FileValidator
-        validation_result = file_validator.validate_file(str(temp_path))
-
+        # Comprehensive file validation
+        validation_result = config.file_validator.validate_file(str(temp_path))
         if not validation_result.is_valid:
             raise HTTPException(
                 status_code=400,
                 detail=f"File validation failed: {validation_result.error_message}"
-            )
-
-        # Additional content type check
-        if file.content_type not in ['application/pdf', 'text/plain']:
-            raise HTTPException(
-                status_code=400,
-                detail="Only PDF and TXT files supported"
             )
 
         # Process with pgvector pipeline using specified table
@@ -253,92 +262,17 @@ async def upload_and_process(
 @app.post("/query")
 async def query_documents(request: QueryRequest):
     """Query documents using pgvector similarity search + LLM generation"""
-
     try:
-        pipeline = get_pipeline()
-
-        # Step 1: pgvector similarity search
-        results = pipeline.search_documents(
+        result = perform_document_search(
             query=request.query,
             limit=request.limit,
             threshold=request.threshold,
-            document_ids=request.document_ids
+            document_ids=request.document_ids,
+            table_name=DEFAULT_TABLE_NAME
         )
-
-        if not results:
-            return {
-                "query": request.query,
-                "answer": "No relevant documents found with the specified similarity threshold.",
-                "sources": [],
-                "search_stats": {
-                    "chunks_found": 0,
-                    "avg_similarity": 0.0,
-                    "search_method": "pgvector_cosine"
-                }
-            }
-
-        # Step 2: Build context from retrieved chunks
-        context_parts = []
-        for i, result in enumerate(results):
-            context_parts.append(f"[Source {i+1}]: {result['text']}")
-
-        context = "\n\n".join(context_parts)
-
-        # Step 3: Generate response with LLM (if available)
-        if gemini_key:
-            try:
-                model = genai.GenerativeModel('gemini-2.0-flash')
-                prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
-                            Context from documents:
-                            {context}
-                            User Question: {request.query}
-
-                            Instructions:
-                            - Answer directly and accurately based on the provided context
-                            - If the context doesn't fully answer the question, clearly state what information is available
-                            - Cite specific sources when making claims
-                            - Be concise but thorough
-
-                            Answer:"""
-
-                response = model.generate_content(prompt)
-                answer = response.text
-
-            except Exception as llm_error:
-                # Fallback if LLM fails
-                answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
-                for i, result in enumerate(results[:3]):
-                    answer += f"{i+1}. {result['text'][:300]}...\n\n"
-        else:
-            # Fallback without LLM
-            answer = f"Found {len(results)} relevant document chunks (LLM not configured):\n\n"
-            for i, result in enumerate(results):
-                similarity_pct = f"{result['similarity']*100:.1f}%"
-                answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
-
-        # Calculate search statistics
-        avg_similarity = sum(r['similarity'] for r in results) / len(results)
-
-        return {
-            "query": request.query,
-            "answer": answer,
-            "sources": [
-                {
-                    "chunk_id": r['chunk_id'],
-                    "text": r['text'][:300] + "..." if len(r['text']) > 300 else r['text'],
-                    "similarity": round(r['similarity'], 3),
-                    "document_id": r['document_id'],
-                    "metadata": r.get('metadata', {})
-                } for r in results
-            ],
-            "search_stats": {
-                "chunks_found": len(results),
-                "avg_similarity": round(avg_similarity, 3),
-                "search_method": "pgvector_cosine",
-                "threshold_used": request.threshold
-            }
-        }
-
+        # Remove table_used from result for API consistency
+        result.pop('table_used', None)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
@@ -348,99 +282,17 @@ async def query_documents_form(
     query: str = Form(...),
     limit: int = Form(5),
     threshold: float = Form(0.7),
-    table_name: str = Form("document_chunks")
+    table_name: str = Form(DEFAULT_TABLE_NAME)
 ):
     """Query documents using form data (for HTML form submission)"""
-    # Use the pipeline with specified table
     try:
-        pipeline = get_pipeline(table_name)
-
-        # Step 1: pgvector similarity search
-        results = pipeline.search_documents(
+        return perform_document_search(
             query=query,
             limit=limit,
             threshold=threshold,
-            document_ids=None
+            document_ids=None,
+            table_name=table_name
         )
-
-        if not results:
-            return {
-                "query": query,
-                "answer": "No relevant documents found with the specified similarity threshold.",
-                "sources": [],
-                "table_used": table_name,
-                "search_stats": {
-                    "chunks_found": 0,
-                    "avg_similarity": 0.0,
-                    "search_method": "pgvector_cosine"
-                }
-            }
-
-        # Step 2: Build context from retrieved chunks
-        context_parts = []
-        for i, result in enumerate(results):
-            context_parts.append(f"[Source {i+1}]: {result['text']}")
-
-        context = "\n\n".join(context_parts)
-
-        # Step 3: Generate response with LLM (if available)
-        if gemini_key:
-            try:
-                model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
-
-Context from documents:
-{context}
-
-User Question: {query}
-
-Instructions:
-- Answer directly and accurately based on the provided context
-- If the context doesn't fully answer the question, clearly state what information is available
-- Cite specific sources when making claims
-- Be concise but thorough
-
-Answer:"""
-
-                response = model.generate_content(prompt)
-                answer = response.text
-
-            except Exception as llm_error:
-                # Fallback if LLM fails
-                answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
-                for i, result in enumerate(results[:3]):
-                    answer += f"{i+1}. {result['text'][:300]}...\n\n"
-        else:
-            # Fallback without LLM
-            answer = f"Found {len(results)} relevant document chunks (LLM not configured):\n\n"
-            for i, result in enumerate(results):
-                similarity_pct = f"{result['similarity']*100:.1f}%"
-                answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
-
-        # Calculate search statistics
-        avg_similarity = sum(r['similarity'] for r in results) / len(results)
-
-        return {
-            "query": query,
-            "answer": answer,
-            "table_used": table_name,
-            "sources": [
-                {
-                    "chunk_id": r['chunk_id'],
-                    "text": r['text'][:300] + "..." if len(r['text']) > 300 else r['text'],
-                    "similarity": round(r['similarity'], 3),
-                    "document_id": r['document_id'],
-                    "metadata": r.get('metadata', {})
-                } for r in results
-            ],
-            "search_stats": {
-                "chunks_found": len(results),
-                "avg_similarity": round(avg_similarity, 3),
-                "search_method": "pgvector_cosine",
-                "threshold_used": threshold
-            }
-        }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
@@ -500,10 +352,9 @@ async def health_check():
 async def get_supported_types():
     """Get information about supported file types and validation config"""
     return {
-        "supported_extensions": file_validator.config.allowed_extensions,
-        "max_file_size_mb": file_validator.config.max_file_size_mb,
+        "supported_extensions": config.file_validator.config.allowed_extensions,
+        "max_file_size_mb": config.file_validator.config.max_file_size_mb,
         "supported_types": ["pdf", "txt"],
-        "mime_types": list(file_validator.mime_type_mapping.keys()),
         "vector_store_info": {
             "embedding_model": "all-MiniLM-L6-v2",
             "database_backend": "PostgreSQL + pgvector",
@@ -515,17 +366,13 @@ async def get_supported_types():
 @app.delete("/table/{table_name}")
 async def delete_table(table_name: str):
     """Delete a specific table from the database (optimized for speed)"""
-    # Security check - only allow deletion of document-related tables
-    allowed_tables = ["document_chunks", "chunks", "documents"]
-
-    if table_name not in allowed_tables:
+    if table_name not in ALLOWED_TABLES:
         raise HTTPException(
             status_code=403,
-            detail=f"Deletion of table '{table_name}' not allowed. Allowed tables: {allowed_tables}"
+            detail=f"Deletion of table '{table_name}' not allowed. Allowed tables: {ALLOWED_TABLES}"
         )
 
     try:
-        global pipeline
         pipeline_instance = get_pipeline(table_name)
 
         # Get connection and delete table quickly
@@ -568,7 +415,7 @@ async def delete_table(table_name: str):
 
         # Reset pipeline if we deleted the current table
         if table_name == pipeline_instance.vector_store.table_name:
-            pipeline = None
+            config.pipeline = None
 
         return {
             "status": "success",
@@ -592,18 +439,14 @@ async def delete_table(table_name: str):
 @app.post("/table/{table_name}/recreate")
 async def recreate_table(table_name: str):
     """Recreate a specific table (delete and reinitialize)"""
-    # Security check - only allow recreation of document-related tables
-    allowed_tables = ["document_chunks", "chunks", "documents"]
-
-    if table_name not in allowed_tables:
+    if table_name not in ALLOWED_TABLES:
         raise HTTPException(
             status_code=403,
-            detail=f"Recreation of table '{table_name}' not allowed. Allowed tables: {allowed_tables}"
+            detail=f"Recreation of table '{table_name}' not allowed. Allowed tables: {ALLOWED_TABLES}"
         )
 
     try:
-        global pipeline
-        pipeline_instance = get_pipeline()
+        pipeline_instance = get_pipeline(table_name)
 
         # Get connection
         conn = pipeline_instance.vector_store._get_connection()
@@ -656,7 +499,7 @@ async def recreate_table(table_name: str):
 
         # Reset pipeline if we recreated the current table
         if table_name == pipeline_instance.vector_store.table_name:
-            pipeline = None
+            config.pipeline = None
 
         return {
             "status": "success",
