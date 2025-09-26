@@ -79,7 +79,7 @@ rag_llama_index/
 ### `document_processing/full_pipeline_pgvector.py`
 **Purpose**: Main FastAPI application with web interface
 
-![MetaData](./images/fastapi.png)
+<img src="./images/fastapi.png" alt="FastAPI Interface" width="600">
 
 - **Key Endpoints**:
   - `GET /` - Web UI for upload/search
@@ -111,16 +111,16 @@ Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
 
 ### 2. Web Interface Usage
 1. **Upload Documents**: Select PDF/TXT files, configure chunking parameters
-    ![HomeScreen](./images/home_screen.png)
+    <img src="./images/home_screen.png" alt="Home Screen" width="600">
 
 2. **Search Documents**: Enter queries, adjust similarity thresholds
-    ![query](./images/query.png)
-    ![seachResult](./images/search_results.png)
-    ![MetaData](./images/metadata.png)
+    <img src="./images/query.png" alt="Query Interface" width="600">
+    <img src="./images/search_results.png" alt="Search Results" width="600">
+    <img src="./images/metadata.png" alt="Document Metadata" width="600">
 
 3. **Monitor System**: View stats and health status
-    ![health](./images/health_status.png)
-    ![MetaData](./images/database.png)
+    <img src="./images/health_status.png" alt="Health Status" width="600">
+    <img src="./images/database.png" alt="Database Statistics" width="600">
 
 ### 3. API Usage Examples
 
