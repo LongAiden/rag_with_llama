@@ -23,8 +23,9 @@ sys.path.insert(0, str(project_root))
 from models.models import QueryRequest, UploadResponse
 
 # Constants
-DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI 
+DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
+DEFAULT_CHUNKING_SIMILARITY = 0.5  # Default similarity threshold for chunking
 CHUNK_SIZE_LIMITS = (128, 2048)
 SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
 ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
@@ -70,17 +71,12 @@ def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
     return config.pipeline
 
 
-def validate_upload_params(chunk_size: int, similarity_threshold: float, content_type: str):
+def validate_upload_params(chunk_size: int, content_type: str):
     """Validate upload parameters"""
     if not (CHUNK_SIZE_LIMITS[0] <= chunk_size <= CHUNK_SIZE_LIMITS[1]):
         raise HTTPException(
             status_code=400,
             detail=f"Chunk size must be between {CHUNK_SIZE_LIMITS[0]}-{CHUNK_SIZE_LIMITS[1]}"
-        )
-    if not (SIMILARITY_THRESHOLD_LIMITS[0] <= similarity_threshold <= SIMILARITY_THRESHOLD_LIMITS[1]):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Similarity threshold must be between {SIMILARITY_THRESHOLD_LIMITS[0]}-{SIMILARITY_THRESHOLD_LIMITS[1]}"
         )
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -192,7 +188,6 @@ async def home():
 async def upload_and_process(
     file: UploadFile = File(...),
     chunk_size: int = Form(512),
-    similarity_threshold: float = Form(0.5),
     table_name: str = Form("document_chunks")
 ):
     """Upload and process document with comprehensive validation and pgvector storage"""
@@ -201,7 +196,7 @@ async def upload_and_process(
         raise HTTPException(status_code=400, detail="No file provided")
 
     # Validate parameters
-    validate_upload_params(chunk_size, similarity_threshold, file.content_type)
+    validate_upload_params(chunk_size, file.content_type)
 
     # Generate unique document ID
     document_id = str(uuid.uuid4())
@@ -228,7 +223,7 @@ async def upload_and_process(
         processed_id = pipeline.process_document(
             file_path=str(temp_path),
             chunk_size=chunk_size,
-            similarity_threshold=similarity_threshold,
+            similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
             document_id=document_id,
             metadata={
                 'filename': file.filename,

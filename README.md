@@ -78,6 +78,9 @@ rag_llama_index/
 
 ### `document_processing/full_pipeline_pgvector.py`
 **Purpose**: Main FastAPI application with web interface
+
+![MetaData](./images/fastapi.png)
+
 - **Key Endpoints**:
   - `GET /` - Web UI for upload/search
   - `POST /upload` - Document processing
@@ -103,7 +106,8 @@ rag_llama_index/
 cd document_processing
 python full_pipeline_pgvector.py
 ```
-Access at: `http://localhost:8000`
+Access webUI at: `http://localhost:8000`
+Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
 
 ### 2. Web Interface Usage
 1. **Upload Documents**: Select PDF/TXT files, configure chunking parameters

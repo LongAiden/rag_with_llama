@@ -103,7 +103,6 @@ HOME_PAGE_HTML = """
             <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
             <br>
             <label>Chunk Size: <input type="number" name="chunk_size" value="512" min="128" max="2048"></label>
-            <label>Similarity Threshold: <input type="number" name="similarity_threshold" value="0.5" min="0.1" max="0.9" step="0.1"></label>
             <br>
             <button type="submit">Upload & Process</button>
         </form>
