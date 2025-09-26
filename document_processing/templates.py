@@ -207,3 +207,328 @@ HOME_PAGE_HTML = """
 </body>
 </html>
 """
+
+SEARCH_RESULTS_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Search Results - pgvector RAG</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f8f9fa;
+            line-height: 1.6;
+        }}
+        .header {{
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }}
+        .answer {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }}
+        .sources {{
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }}
+        .source-item {{
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border-left: 4px solid #007bff;
+        }}
+        .stats {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+        }}
+        button {{
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }}
+        button:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+        }}
+        h1 {{ color: #2c3e50; margin-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-bottom: 15px; }}
+        .query {{ font-style: italic; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔍 Search Results</h1>
+        <p class="query"><strong>Query:</strong> "{query}"</p>
+        <a href="/"><button>← Back to Search</button></a>
+    </div>
+
+    <div class="answer">
+        <h2>💡 Answer</h2>
+        <p>{answer}</p>
+    </div>
+
+    <div class="sources">
+        <h2>📚 Sources ({source_count} found)</h2>
+        {sources_html}
+    </div>
+
+    <div class="stats">
+        <strong>Search Statistics:</strong><br>
+        • Chunks found: {chunks_found}<br>
+        • Average similarity: {avg_similarity}<br>
+        • Search method: {search_method}<br>
+        • Table used: {table_used}<br>
+        • Threshold: {threshold_used}
+    </div>
+</body>
+</html>
+"""
+
+SEARCH_ERROR_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Error - pgvector RAG</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 600px;
+            margin: 100px auto;
+            padding: 20px;
+            text-align: center;
+        }}
+        .error {{
+            background: #ffebee;
+            padding: 30px;
+            border-radius: 12px;
+            border-left: 5px solid #f44336;
+        }}
+        button {{
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h2>❌ Search Failed</h2>
+        <p>Sorry, there was an error processing your query:</p>
+        <p><em>{error_message}</em></p>
+        <a href="/"><button>← Back to Search</button></a>
+    </div>
+</body>
+</html>
+"""
+
+STATS_PAGE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Database Statistics - pgvector RAG</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f8f9fa;
+            line-height: 1.6;
+        }}
+        .header {{
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            text-align: center;
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }}
+        .stat-card {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .stat-number {{
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #007bff;
+            margin-bottom: 10px;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        .config-section {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }}
+        .config-item {{
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        .config-item:last-child {{
+            border-bottom: none;
+        }}
+        .config-label {{
+            font-weight: 600;
+            color: #333;
+        }}
+        .config-value {{
+            color: #007bff;
+            font-family: 'Courier New', monospace;
+        }}
+        button {{
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-block;
+        }}
+        h1 {{ color: #2c3e50; margin-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-bottom: 15px; }}
+        .refresh-note {{
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 Database Statistics</h1>
+        <p>Real-time statistics from your pgvector RAG system</p>
+        <a href="/"><button>← Back to Home</button></a>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-number">{total_documents}</div>
+            <div class="stat-label">Total Documents</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{total_chunks}</div>
+            <div class="stat-label">Total Chunks</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{avg_text_length}</div>
+            <div class="stat-label">Avg Text Length</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{avg_chunks_per_doc}</div>
+            <div class="stat-label">Avg Chunks/Doc</div>
+        </div>
+    </div>
+
+    <div class="config-section">
+        <h2>⚙️ System Configuration</h2>
+        <div class="config-item">
+            <span class="config-label">Embedding Model</span>
+            <span class="config-value">{embedding_model}</span>
+        </div>
+        <div class="config-item">
+            <span class="config-label">Embedding Dimensions</span>
+            <span class="config-value">{embedding_dim}</span>
+        </div>
+        <div class="config-item">
+            <span class="config-label">Active Table</span>
+            <span class="config-value">{table_name}</span>
+        </div>
+        <div class="config-item">
+            <span class="config-label">Database Backend</span>
+            <span class="config-value">PostgreSQL + pgvector</span>
+        </div>
+        <div class="config-item">
+            <span class="config-label">Search Method</span>
+            <span class="config-value">Cosine Similarity</span>
+        </div>
+    </div>
+
+    <div class="config-section">
+        <h2>📅 Timeline Information</h2>
+        <div class="config-item">
+            <span class="config-label">Earliest Document</span>
+            <span class="config-value">{earliest_chunk}</span>
+        </div>
+        <div class="config-item">
+            <span class="config-label">Latest Document</span>
+            <span class="config-value">{latest_chunk}</span>
+        </div>
+    </div>
+
+    <div class="refresh-note">
+        <strong>📝 Note:</strong> Statistics are computed in real-time. Refresh this page to see updated numbers.
+    </div>
+</body>
+</html>
+"""
+
+STATS_ERROR_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Database Stats Error</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
+        .error {{ background: #ffebee; padding: 30px; border-radius: 12px; border-left: 5px solid #f44336; }}
+        button {{ background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h2>❌ Failed to Load Statistics</h2>
+        <p>Error: {error_message}</p>
+        <a href="/"><button>← Back to Home</button></a>
+    </div>
+</body>
+</html>
+"""
