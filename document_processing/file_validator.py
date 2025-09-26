@@ -1,4 +1,3 @@
-from models.models import SupportedFileType, FileValidationResult, FileValidationConfig
 import sys
 import os
 from pathlib import Path
@@ -7,6 +6,8 @@ from typing import List, Optional
 # Add project root to path to import models
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+from models.models import SupportedFileType, FileValidationResult, FileValidationConfig
 
 
 class FileValidator:

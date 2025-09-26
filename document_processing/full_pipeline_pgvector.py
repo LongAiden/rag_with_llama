@@ -28,7 +28,7 @@ DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
 CHUNK_SIZE_LIMITS = (128, 2048)
 SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
 ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
-ALLOWED_TABLES = ["document_chunks", "chunks", "documents"]
+ALLOWED_TABLES = ["document_chunks",'bert', "test1", "test2"]
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
@@ -146,7 +146,8 @@ def perform_document_search(query: str, limit: int, threshold: float, document_i
             "search_stats": {
                 "chunks_found": 0,
                 "avg_similarity": 0.0,
-                "search_method": "pgvector_cosine"
+                "search_method": "pgvector_cosine",
+                "threshold_used": threshold
             }
         }
 
@@ -233,7 +234,6 @@ async def upload_and_process(
                 'filename': file.filename,
                 'content_type': file.content_type,
                 'file_size': validation_result.file_size,
-                'mime_type': validation_result.mime_type,
                 'upload_timestamp': str(uuid.uuid1().time),
                 'validation_passed': True
             }

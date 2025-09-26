@@ -9,6 +9,7 @@ deployment/.env*
 
 # IDE settings
 .vscode/
+.DS_Store
 
 # Python cache files
 __pycache__/

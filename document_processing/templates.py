@@ -53,6 +53,39 @@ HOME_PAGE_HTML = """
         }
         h1 { color: #2c3e50; }
         h2 { color: #34495e; margin-bottom: 15px; }
+
+        /* Success notification styles */
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            color: white;
+            font-weight: 600;
+            z-index: 1000;
+            opacity: 0;
+            transform: translateX(400px);
+            transition: all 0.3s ease;
+        }
+        .notification.success {
+            background: linear-gradient(135deg, #28a745, #20c997);
+        }
+        .notification.error {
+            background: linear-gradient(135deg, #dc3545, #e74c3c);
+        }
+        .notification.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+        .notification .close {
+            float: right;
+            margin-left: 15px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+        }
     </style>
 </head>
 <body>
@@ -96,6 +129,82 @@ HOME_PAGE_HTML = """
         <a href="/stats" target="_blank"><button>View Database Statistics</button></a>
         <a href="/health" target="_blank"><button>Health Check</button></a>
     </div>
+
+    <!-- Success/Error notification -->
+    <div id="notification" class="notification">
+        <span class="close" onclick="hideNotification()">×</span>
+        <span id="notification-message"></span>
+    </div>
+
+    <script>
+        // Show notification function
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            const messageElement = document.getElementById('notification-message');
+
+            messageElement.textContent = message;
+            notification.className = `notification ${type}`;
+
+            // Show notification
+            setTimeout(() => {
+                notification.classList.add('show');
+            }, 100);
+
+            // Auto hide after 5 seconds
+            setTimeout(() => {
+                hideNotification();
+            }, 5000);
+        }
+
+        // Hide notification function
+        function hideNotification() {
+            const notification = document.getElementById('notification');
+            notification.classList.remove('show');
+        }
+
+        // Handle upload form submission with AJAX
+        document.querySelector('form[action="/upload"]').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const formData = new FormData(this);
+            const submitButton = this.querySelector('button[type="submit"]');
+            const originalText = submitButton.textContent;
+
+            // Show loading state
+            submitButton.textContent = 'Processing...';
+            submitButton.disabled = true;
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    showNotification(`✅ Document "${result.filename}" uploaded and processed successfully! Document ID: ${result.document_id.substring(0,8)}...`, 'success');
+                    this.reset(); // Clear the form
+                } else {
+                    showNotification(`❌ Upload failed: ${result.detail}`, 'error');
+                }
+            } catch (error) {
+                showNotification(`❌ Upload failed: ${error.message}`, 'error');
+            } finally {
+                // Restore button
+                submitButton.textContent = originalText;
+                submitButton.disabled = false;
+            }
+        });
+
+        // Check for URL parameters to show notifications (if redirected)
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('upload') === 'success') {
+            showNotification('✅ Document uploaded and processed successfully!', 'success');
+        } else if (urlParams.get('upload') === 'error') {
+            showNotification('❌ Upload failed. Please try again.', 'error');
+        }
+    </script>
 </body>
 </html>
 """
