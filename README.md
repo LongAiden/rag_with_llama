@@ -24,22 +24,6 @@ GOOGLE_API_KEY=your_gemini_api_key
 bash deployment/setup.sh
 ```
 
-### 3. Manual Installation (Alternative)
-```bash
-# Install PostgreSQL and pgvector
-brew install postgresql pgvector
-
-# Install Python dependencies
-pip install fastapi uvicorn psycopg2-binary pgvector
-pip install sentence-transformers chonkie PyPDF2
-pip install google-generativeai python-dotenv pydantic
-
-# Start PostgreSQL and create database
-brew services start postgresql
-psql postgres -c "CREATE DATABASE rag_db;"
-psql rag_db -c "CREATE EXTENSION vector;"
-```
-
 ## 📁 Project Structure
 
 ```
@@ -123,8 +107,14 @@ Access at: `http://localhost:8000`
 
 ### 2. Web Interface Usage
 1. **Upload Documents**: Select PDF/TXT files, configure chunking parameters
+    ![HomeScreen](./images/home_screen.png)
+
 2. **Search Documents**: Enter queries, adjust similarity thresholds
+    ![query](./images/query.png)
+
 3. **Monitor System**: View stats and health status
+    ![seachResult](./images/search_results.png)
+    ![MetaData](./images/metadata.png)
 
 ### 3. API Usage Examples
 
