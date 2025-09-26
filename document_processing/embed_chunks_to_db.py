@@ -6,6 +6,7 @@ import psycopg2
 import numpy as np
 import PyPDF2
 from pathlib import Path
+from docx import Document
 
 from pgvector.psycopg2 import register_vector
 from chonkie import SemanticChunker
@@ -313,6 +314,33 @@ class ChunkEmbeddingPipeline:
                 text += page.extract_text() + "\n"
         return text
 
+    def extract_text_from_docx(self, docx_path: str) -> str:
+        """Extract text from DOCX file."""
+        try:
+            from docx import Document
+            
+            doc = Document(docx_path)
+            text_parts = []
+            
+            # Extract from paragraphs
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():  # Skip empty paragraphs
+                    text_parts.append(paragraph.text)
+            
+            # Extract from tables
+            for table in doc.tables:
+                table_text = []
+                for row in table.rows:
+                    row_text = [cell.text.strip() for cell in row.cells]
+                    table_text.append(" | ".join(row_text))
+                text_parts.append("\n".join(table_text))
+            
+            return "\n\n".join(text_parts)
+            
+        except Exception as e:
+            print(f"Error extracting text from DOCX: {e}")
+            raise ValueError(f"Failed to extract text from DOCX file: {e}")
+
     def chunk_text(self, text: str, chunk_size: int = 512,
                    similarity_threshold: float = 0.5) -> List:
         """
@@ -364,6 +392,8 @@ class ChunkEmbeddingPipeline:
         # Extract text based on file type
         if file_type == 'pdf':
             text = self.extract_text_from_pdf(str(file_path))
+        elif file_type == 'docx':
+            text = self.extract_text_from_docx(str(file_path))
         elif file_type in ['txt']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 text = f.read()

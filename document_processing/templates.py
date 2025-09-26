@@ -96,9 +96,9 @@ HOME_PAGE_HTML = """
 
     <div class="section">
         <h2>📤 Upload & Process Document</h2>
-        <p>Supported formats: PDF, TXT. Documents are chunked semantically and stored with vector embeddings.</p>
+        <p>Supported formats: PDF, DOCX, TXT. Documents are chunked semantically and stored with vector embeddings.</p>
         <form action="/upload" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".pdf,.txt" required>
+            <input type="file" name="file" accept=".pdf,.docx,.txt" required>
             <br>
             <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
             <br>

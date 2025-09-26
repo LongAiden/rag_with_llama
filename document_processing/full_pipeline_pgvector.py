@@ -34,7 +34,7 @@ DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
 DEFAULT_CHUNKING_SIMILARITY = 0.5  # Default similarity threshold for chunking
 CHUNK_SIZE_LIMITS = (128, 2048)
 SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
-ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
+ALLOWED_CONTENT_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']
 ALLOWED_TABLES = ["document_chunks",'bert', "test1", "test2"]
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
@@ -87,7 +87,7 @@ def validate_upload_params(chunk_size: int, content_type: str):
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF and TXT files supported"
+            detail="Only PDF, DOCX, and TXT files supported"
         )
 
 
@@ -589,7 +589,7 @@ async def get_supported_types():
     return {
         "supported_extensions": config.file_validator.config.allowed_extensions,
         "max_file_size_mb": config.file_validator.config.max_file_size_mb,
-        "supported_types": ["pdf", "txt"],
+        "supported_types": ["pdf", "docx", "txt"],
         "vector_store_info": {
             "embedding_model": "all-MiniLM-L6-v2",
             "database_backend": "PostgreSQL + pgvector",
