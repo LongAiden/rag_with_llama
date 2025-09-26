@@ -116,7 +116,7 @@ Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
 2. **Search Documents**: Enter queries, adjust similarity thresholds
     <img src="./images/query.png" alt="Query Interface" width="600">
     <img src="./images/search_results.png" alt="Search Results" width="600">
-    <img src="./images/metadata.png" alt="Document Metadata" width="600">
+    <img src="./images/metadata.png" alt="Document Metadata" width="400">
 
 3. **Monitor System**: View stats and health status
     <img src="./images/health_status.png" alt="Health Status" width="600">
