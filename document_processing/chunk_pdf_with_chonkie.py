@@ -1,8 +1,5 @@
-import os
-from pathlib import Path
 import PyPDF2
-from chonkie import SemanticChunker, TokenChunker, WordChunker, SentenceChunker
-from sentence_transformers import SentenceTransformer
+from chonkie import SemanticChunker
 
 
 def extract_text_from_pdf(pdf_path):
@@ -79,53 +76,3 @@ def save_chunks_to_file(chunks, output_path, chunker_type):
             if hasattr(chunk, 'end_index'):
                 f.write(f"End Index: {chunk.end_index}\n")
             f.write("\n" + "="*50 + "\n\n")
-
-
-def main():
-    # Path to your PDF file
-    pdf_path = "docs/llama2.pdf"
-
-    # Check if PDF exists
-    if not os.path.exists(pdf_path):
-        print(f"Error: PDF file not found at {pdf_path}")
-        return
-
-    print("Step 1: Extracting text from PDF...")
-    text = extract_text_from_pdf(pdf_path)
-    print(f"Extracted {len(text)} characters from PDF")
-
-    # Create output directory
-    output_dir = "chunked_output"
-    os.makedirs(output_dir, exist_ok=True)
-
-    print("\nStep 2: Setting up embedding model...")
-    # Pass model name as string - Chonkie will load it internally
-    embedding_model_name = 'all-MiniLM-L6-v2'
-    print(f"  - Using model: {embedding_model_name}")
-
-    print("\nStep 3: Chunking with SemanticChunker and custom embedding model")
-    semantic_chunks = chunk_with_semantic_chunker(
-        text,
-        chunk_size=512,
-        similarity_threshold=0.7,
-        embedding_model=embedding_model_name
-    )
-    save_chunks_to_file(
-        semantic_chunks, f"{output_dir}/semantic_chunks_custom.txt", "SemanticChunker (Custom Model)")
-    print(f"Created {len(semantic_chunks)} semantic chunks with custom model")
-
-    print(f"\nStep 4: All chunks saved to '{output_dir}' directory")
-
-    # Print sample chunks
-    print("\nSample chunks:")
-    print("="*50)
-
-    if semantic_chunks:
-        print("First Semantic Chunk:")
-        print(f"Text: {semantic_chunks[0].text[:200]}...")
-        print(f"Tokens: {semantic_chunks[0].token_count}")
-        print()
-
-
-if __name__ == "__main__":
-    main()

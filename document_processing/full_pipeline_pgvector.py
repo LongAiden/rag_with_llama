@@ -277,7 +277,7 @@ async def query_documents(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
-@app.post("/query-form")
+@app.post("/query-form", response_class=HTMLResponse)
 async def query_documents_form(
     query: str = Form(...),
     limit: int = Form(5),
@@ -286,15 +286,166 @@ async def query_documents_form(
 ):
     """Query documents using form data (for HTML form submission)"""
     try:
-        return perform_document_search(
+        result = perform_document_search(
             query=query,
             limit=limit,
             threshold=threshold,
             document_ids=None,
             table_name=table_name
         )
+
+        # Create HTML response showing just the answer
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Search Results - pgvector RAG</title>
+            <style>
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    max-width: 900px;
+                    margin: 50px auto;
+                    padding: 20px;
+                    background: #f8f9fa;
+                    line-height: 1.6;
+                }}
+                .header {{
+                    background: white;
+                    padding: 20px;
+                    border-radius: 12px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    margin-bottom: 20px;
+                }}
+                .answer {{
+                    background: white;
+                    padding: 25px;
+                    border-radius: 12px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    margin-bottom: 20px;
+                }}
+                .sources {{
+                    background: #e3f2fd;
+                    padding: 20px;
+                    border-radius: 12px;
+                    margin-bottom: 20px;
+                }}
+                .source-item {{
+                    background: white;
+                    padding: 15px;
+                    margin: 10px 0;
+                    border-radius: 8px;
+                    border-left: 4px solid #007bff;
+                }}
+                .stats {{
+                    background: #f8f9fa;
+                    padding: 15px;
+                    border-radius: 8px;
+                    margin-top: 20px;
+                    font-size: 14px;
+                    color: #666;
+                }}
+                button {{
+                    background: linear-gradient(135deg, #007bff, #0056b3);
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-weight: 600;
+                    transition: all 0.2s;
+                    text-decoration: none;
+                    display: inline-block;
+                }}
+                button:hover {{
+                    transform: translateY(-1px);
+                    box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+                }}
+                h1 {{ color: #2c3e50; margin-bottom: 10px; }}
+                h2 {{ color: #34495e; margin-bottom: 15px; }}
+                .query {{ font-style: italic; color: #666; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🔍 Search Results</h1>
+                <p class="query"><strong>Query:</strong> "{query}"</p>
+                <a href="/"><button>← Back to Search</button></a>
+            </div>
+
+            <div class="answer">
+                <h2>💡 Answer</h2>
+                <p>{result['answer'].replace(chr(10), '<br>')}</p>
+            </div>
+
+            <div class="sources">
+                <h2>📚 Sources ({len(result['sources'])} found)</h2>
+                {''.join([f"""
+                <div class="source-item">
+                    <strong>Source {i+1}</strong> (Similarity: {source['similarity']:.1%})<br>
+                    <em>Document: {source['document_id'][:8]}...</em><br><br>
+                    {source['text']}
+                </div>
+                """ for i, source in enumerate(result['sources'])])}
+            </div>
+
+            <div class="stats">
+                <strong>Search Statistics:</strong><br>
+                • Chunks found: {result['search_stats']['chunks_found']}<br>
+                • Average similarity: {result['search_stats']['avg_similarity']:.1%}<br>
+                • Search method: {result['search_stats']['search_method']}<br>
+                • Table used: {result['table_used']}<br>
+                • Threshold: {result['search_stats']['threshold_used']:.1%}
+            </div>
+        </body>
+        </html>
+        """
+
+        return html_content
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+        # Return error page instead of JSON
+        error_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Error - pgvector RAG</title>
+            <style>
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    max-width: 600px;
+                    margin: 100px auto;
+                    padding: 20px;
+                    text-align: center;
+                }}
+                .error {{
+                    background: #ffebee;
+                    padding: 30px;
+                    border-radius: 12px;
+                    border-left: 5px solid #f44336;
+                }}
+                button {{
+                    background: linear-gradient(135deg, #007bff, #0056b3);
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-weight: 600;
+                    margin-top: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="error">
+                <h2>❌ Search Failed</h2>
+                <p>Sorry, there was an error processing your query:</p>
+                <p><em>{str(e)}</em></p>
+                <a href="/"><button>← Back to Search</button></a>
+            </div>
+        </body>
+        </html>
+        """
+        return error_html
 
 
 @app.get("/stats")
