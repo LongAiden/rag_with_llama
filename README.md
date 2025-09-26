@@ -119,6 +119,7 @@ Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
     <img src="./images/metadata.png" alt="Document Metadata" width="400">
 
 3. **Monitor System**: View stats and health status
+
     <img src="./images/health_status.png" alt="Health Status" width="600">
     <img src="./images/database.png" alt="Database Statistics" width="600">
 
