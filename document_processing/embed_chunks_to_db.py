@@ -1,16 +1,18 @@
 import sys
-from pgvector.psycopg2 import register_vector
-import PyPDF2
-from chonkie import SemanticChunker
-from sentence_transformers import SentenceTransformer
-import numpy as np
-from psycopg2.extras import execute_values
-import psycopg2
 import os
 import json
 import uuid
-from typing import List, Dict, Any, Optional
+import psycopg2
+import numpy as np
+import PyPDF2
 from pathlib import Path
+
+from pgvector.psycopg2 import register_vector
+from chonkie import SemanticChunker
+from sentence_transformers import SentenceTransformer
+from psycopg2.extras import execute_values
+
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
 # Import your existing chunking functions

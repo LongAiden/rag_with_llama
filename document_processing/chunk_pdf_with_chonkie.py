@@ -5,10 +5,8 @@ from chonkie import SemanticChunker
 def extract_text_from_pdf(pdf_path):
     """
     Extract text from PDF file using PyPDF2.
-
     Args:
         pdf_path (str): Path to the PDF file
-
     Returns:
         str: Extracted text from all pages
     """
@@ -26,13 +24,11 @@ def extract_text_from_pdf(pdf_path):
 def chunk_with_semantic_chunker(text, chunk_size=512, similarity_threshold=0.5, embedding_model=None):
     """
     Chunk text using Chonkie's SemanticChunker with custom embedding model.
-
     Args:
         text (str): Text to chunk
         chunk_size (int): Maximum tokens per chunk
         similarity_threshold (float): Similarity threshold for semantic chunking
         embedding_model: Custom embedding model (SentenceTransformer or similar)
-
     Returns:
         list: List of chunks
     """

@@ -112,10 +112,8 @@ class FileValidator:
     def validate_files(self, file_paths: List[str]) -> List[FileValidationResult]:
         """
         Validate multiple files and return validation results.
-
         Args:
             file_paths: List of file paths to validate
-
         Returns:
             List of FileValidationResult objects
         """
