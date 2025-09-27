@@ -6,7 +6,13 @@ from pathlib import Path
 import google.generativeai as genai
 from file_validator import FileValidator, FileValidationConfig
 from embed_chunks_to_db import ChunkEmbeddingPipeline
-from templates import HOME_PAGE_HTML
+from templates import (
+    HOME_PAGE_HTML,
+    SEARCH_RESULTS_HTML,
+    SEARCH_ERROR_HTML,
+    STATS_PAGE_HTML,
+    STATS_ERROR_HTML
+)
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import HTMLResponse
@@ -23,12 +29,13 @@ sys.path.insert(0, str(project_root))
 from models.models import QueryRequest, UploadResponse
 
 # Constants
-DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI 
+DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
+DEFAULT_CHUNKING_SIMILARITY = 0.5  # Default similarity threshold for chunking
 CHUNK_SIZE_LIMITS = (128, 2048)
 SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
-ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
-ALLOWED_TABLES = ["document_chunks", "chunks", "documents"]
+ALLOWED_CONTENT_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']
+ALLOWED_TABLES = ["document_chunks",'bert', "test1", "test2"]
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
@@ -70,22 +77,17 @@ def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
     return config.pipeline
 
 
-def validate_upload_params(chunk_size: int, similarity_threshold: float, content_type: str):
+def validate_upload_params(chunk_size: int, content_type: str):
     """Validate upload parameters"""
     if not (CHUNK_SIZE_LIMITS[0] <= chunk_size <= CHUNK_SIZE_LIMITS[1]):
         raise HTTPException(
             status_code=400,
             detail=f"Chunk size must be between {CHUNK_SIZE_LIMITS[0]}-{CHUNK_SIZE_LIMITS[1]}"
         )
-    if not (SIMILARITY_THRESHOLD_LIMITS[0] <= similarity_threshold <= SIMILARITY_THRESHOLD_LIMITS[1]):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Similarity threshold must be between {SIMILARITY_THRESHOLD_LIMITS[0]}-{SIMILARITY_THRESHOLD_LIMITS[1]}"
-        )
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF and TXT files supported"
+            detail="Only PDF, DOCX, and TXT files supported"
         )
 
 
@@ -146,7 +148,8 @@ def perform_document_search(query: str, limit: int, threshold: float, document_i
             "search_stats": {
                 "chunks_found": 0,
                 "avg_similarity": 0.0,
-                "search_method": "pgvector_cosine"
+                "search_method": "pgvector_cosine",
+                "threshold_used": threshold
             }
         }
 
@@ -191,7 +194,6 @@ async def home():
 async def upload_and_process(
     file: UploadFile = File(...),
     chunk_size: int = Form(512),
-    similarity_threshold: float = Form(0.5),
     table_name: str = Form("document_chunks")
 ):
     """Upload and process document with comprehensive validation and pgvector storage"""
@@ -200,7 +202,7 @@ async def upload_and_process(
         raise HTTPException(status_code=400, detail="No file provided")
 
     # Validate parameters
-    validate_upload_params(chunk_size, similarity_threshold, file.content_type)
+    validate_upload_params(chunk_size, file.content_type)
 
     # Generate unique document ID
     document_id = str(uuid.uuid4())
@@ -227,13 +229,12 @@ async def upload_and_process(
         processed_id = pipeline.process_document(
             file_path=str(temp_path),
             chunk_size=chunk_size,
-            similarity_threshold=similarity_threshold,
+            similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
             document_id=document_id,
             metadata={
                 'filename': file.filename,
                 'content_type': file.content_type,
                 'file_size': validation_result.file_size,
-                'mime_type': validation_result.mime_type,
                 'upload_timestamp': str(uuid.uuid1().time),
                 'validation_passed': True
             }
@@ -294,16 +295,79 @@ async def query_documents_form(
             table_name=table_name
         )
 
-        # Create HTML response showing just the answer
+        # Build sources HTML
+        sources_html = ''.join([f"""
+        <div class="source-item">
+            <strong>Source {i+1}</strong> (Similarity: {source['similarity']:.1%})<br>
+            <em>Document: {source['document_id'][:8]}...</em><br><br>
+            {source['text']}
+        </div>
+        """ for i, source in enumerate(result['sources'])])
+
+        # Use template with substitutions
+        html_content = SEARCH_RESULTS_HTML.format(
+            query=query,
+            answer=result['answer'].replace('\n', '<br>'),
+            source_count=len(result['sources']),
+            sources_html=sources_html,
+            chunks_found=result['search_stats']['chunks_found'],
+            avg_similarity=f"{result['search_stats']['avg_similarity']:.1%}",
+            search_method=result['search_stats']['search_method'],
+            table_used=result['table_used'],
+            threshold_used=f"{result['search_stats']['threshold_used']:.1%}"
+        )
+
+        return html_content
+
+    except Exception as e:
+        # Return error page using template
+        return SEARCH_ERROR_HTML.format(error_message=str(e))
+
+
+@app.get("/stats", response_class=HTMLResponse)
+async def get_database_stats():
+    """Get database statistics and collection information"""
+    try:
+        pipeline = get_pipeline()
+        stats = pipeline.get_stats()
+
+        # Use template with substitutions
+        return STATS_PAGE_HTML.format(
+            total_documents=f"{stats['total_documents']:,}",
+            total_chunks=f"{stats['total_chunks']:,}",
+            avg_text_length=f"{stats['avg_text_length']:.0f}",
+            avg_chunks_per_doc=f"{stats['total_chunks'] // max(stats['total_documents'], 1):.0f}",
+            embedding_model=pipeline.embedding_generator.model_name,
+            embedding_dim=pipeline.embedding_generator.embedding_dim,
+            table_name=pipeline.vector_store.table_name,
+            earliest_chunk=stats['earliest_chunk'] or 'No documents yet',
+            latest_chunk=stats['latest_chunk'] or 'No documents yet'
+        )
+    except Exception as e:
+        return STATS_ERROR_HTML.format(error_message=str(e))
+
+
+@app.get("/health", response_class=HTMLResponse)
+async def health_check():
+    """Health check endpoint to verify system status"""
+    try:
+        pipeline = get_pipeline()
+        stats = pipeline.get_stats()
+
+        # Check database connection
+        db_status = "healthy" if stats['total_chunks'] >= 0 else "error"
+        status_icon = "✅" if db_status == "healthy" else "❌"
+        status_color = "#28a745" if db_status == "healthy" else "#dc3545"
+
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Search Results - pgvector RAG</title>
+            <title>Health Check - pgvector RAG</title>
             <style>
                 body {{
                     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    max-width: 900px;
+                    max-width: 800px;
                     margin: 50px auto;
                     padding: 20px;
                     background: #f8f9fa;
@@ -315,34 +379,82 @@ async def query_documents_form(
                     border-radius: 12px;
                     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
                     margin-bottom: 20px;
+                    text-align: center;
                 }}
-                .answer {{
+                .status-main {{
+                    background: white;
+                    padding: 30px;
+                    border-radius: 12px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    margin-bottom: 20px;
+                    text-align: center;
+                    border-left: 6px solid {status_color};
+                }}
+                .status-icon {{
+                    font-size: 4rem;
+                    margin-bottom: 15px;
+                }}
+                .status-text {{
+                    font-size: 1.5rem;
+                    font-weight: bold;
+                    color: {status_color};
+                    text-transform: uppercase;
+                    letter-spacing: 2px;
+                }}
+                .components-grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 15px;
+                    margin-bottom: 20px;
+                }}
+                .component-card {{
+                    background: white;
+                    padding: 20px;
+                    border-radius: 12px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    text-align: center;
+                }}
+                .component-status {{
+                    font-size: 2rem;
+                    margin-bottom: 10px;
+                }}
+                .component-name {{
+                    font-weight: 600;
+                    color: #333;
+                    margin-bottom: 5px;
+                }}
+                .component-detail {{
+                    color: #666;
+                    font-size: 0.9rem;
+                }}
+                .metrics-section {{
                     background: white;
                     padding: 25px;
                     border-radius: 12px;
                     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
                     margin-bottom: 20px;
                 }}
-                .sources {{
-                    background: #e3f2fd;
-                    padding: 20px;
-                    border-radius: 12px;
-                    margin-bottom: 20px;
+                .metrics-grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                    gap: 15px;
                 }}
-                .source-item {{
-                    background: white;
+                .metric-item {{
+                    text-align: center;
                     padding: 15px;
-                    margin: 10px 0;
-                    border-radius: 8px;
-                    border-left: 4px solid #007bff;
-                }}
-                .stats {{
                     background: #f8f9fa;
-                    padding: 15px;
                     border-radius: 8px;
-                    margin-top: 20px;
-                    font-size: 14px;
+                }}
+                .metric-number {{
+                    font-size: 1.8rem;
+                    font-weight: bold;
+                    color: #007bff;
+                    margin-bottom: 5px;
+                }}
+                .metric-label {{
                     color: #666;
+                    font-size: 0.85rem;
+                    text-transform: uppercase;
                 }}
                 button {{
                     background: linear-gradient(135deg, #007bff, #0056b3);
@@ -352,151 +464,123 @@ async def query_documents_form(
                     border-radius: 6px;
                     cursor: pointer;
                     font-weight: 600;
-                    transition: all 0.2s;
                     text-decoration: none;
                     display: inline-block;
-                }}
-                button:hover {{
-                    transform: translateY(-1px);
-                    box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+                    margin: 5px;
                 }}
                 h1 {{ color: #2c3e50; margin-bottom: 10px; }}
                 h2 {{ color: #34495e; margin-bottom: 15px; }}
-                .query {{ font-style: italic; color: #666; }}
+                .timestamp {{
+                    background: #e3f2fd;
+                    padding: 15px;
+                    border-radius: 8px;
+                    font-size: 14px;
+                    color: #666;
+                    text-align: center;
+                }}
             </style>
+            <script>
+                // Auto-refresh every 30 seconds
+                setTimeout(() => {{
+                    location.reload();
+                }}, 30000);
+            </script>
         </head>
         <body>
             <div class="header">
-                <h1>🔍 Search Results</h1>
-                <p class="query"><strong>Query:</strong> "{query}"</p>
-                <a href="/"><button>← Back to Search</button></a>
+                <h1>🏥 System Health Check</h1>
+                <p>Real-time status monitoring for your RAG system</p>
+                <a href="/"><button>← Back to Home</button></a>
+                <a href="/stats"><button>📊 View Statistics</button></a>
             </div>
 
-            <div class="answer">
-                <h2>💡 Answer</h2>
-                <p>{result['answer'].replace(chr(10), '<br>')}</p>
+            <div class="status-main">
+                <div class="status-icon">{status_icon}</div>
+                <div class="status-text">System {db_status.upper()}</div>
             </div>
 
-            <div class="sources">
-                <h2>📚 Sources ({len(result['sources'])} found)</h2>
-                {''.join([f"""
-                <div class="source-item">
-                    <strong>Source {i+1}</strong> (Similarity: {source['similarity']:.1%})<br>
-                    <em>Document: {source['document_id'][:8]}...</em><br><br>
-                    {source['text']}
+            <div class="components-grid">
+                <div class="component-card">
+                    <div class="component-status">🗄️</div>
+                    <div class="component-name">Database</div>
+                    <div class="component-detail">PostgreSQL + pgvector</div>
+                    <div class="component-detail" style="color: {status_color}; font-weight: bold;">{db_status.upper()}</div>
                 </div>
-                """ for i, source in enumerate(result['sources'])])}
+                <div class="component-card">
+                    <div class="component-status">🧠</div>
+                    <div class="component-name">Embedding Model</div>
+                    <div class="component-detail">{pipeline.embedding_generator.model_name}</div>
+                    <div class="component-detail" style="color: #28a745; font-weight: bold;">LOADED</div>
+                </div>
+                <div class="component-card">
+                    <div class="component-status">🔍</div>
+                    <div class="component-name">Vector Store</div>
+                    <div class="component-detail">Table: {pipeline.vector_store.table_name}</div>
+                    <div class="component-detail" style="color: #28a745; font-weight: bold;">OPERATIONAL</div>
+                </div>
+                <div class="component-card">
+                    <div class="component-status">🤖</div>
+                    <div class="component-name">LLM Service</div>
+                    <div class="component-detail">Gemini 2.0 Flash</div>
+                    <div class="component-detail" style="color: {'#28a745' if config.gemini_key else '#ffc107'}; font-weight: bold;">{'READY' if config.gemini_key else 'NOT CONFIGURED'}</div>
+                </div>
             </div>
 
-            <div class="stats">
-                <strong>Search Statistics:</strong><br>
-                • Chunks found: {result['search_stats']['chunks_found']}<br>
-                • Average similarity: {result['search_stats']['avg_similarity']:.1%}<br>
-                • Search method: {result['search_stats']['search_method']}<br>
-                • Table used: {result['table_used']}<br>
-                • Threshold: {result['search_stats']['threshold_used']:.1%}
+            <div class="metrics-section">
+                <h2>📈 Quick Metrics</h2>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-number">{stats['total_documents']:,}</div>
+                        <div class="metric-label">Documents</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-number">{stats['total_chunks']:,}</div>
+                        <div class="metric-label">Chunks</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-number">{pipeline.embedding_generator.embedding_dim}</div>
+                        <div class="metric-label">Embedding Dim</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-number">{stats['avg_text_length']:.0f}</div>
+                        <div class="metric-label">Avg Text Length</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="timestamp">
+                <strong>Last Updated:</strong> {uuid.uuid1().time} | <strong>Auto-refresh:</strong> Every 30 seconds
             </div>
         </body>
         </html>
         """
-
         return html_content
 
     except Exception as e:
-        # Return error page instead of JSON
         error_html = f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Error - pgvector RAG</title>
+            <title>Health Check Error</title>
             <style>
-                body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    max-width: 600px;
-                    margin: 100px auto;
-                    padding: 20px;
-                    text-align: center;
-                }}
-                .error {{
-                    background: #ffebee;
-                    padding: 30px;
-                    border-radius: 12px;
-                    border-left: 5px solid #f44336;
-                }}
-                button {{
-                    background: linear-gradient(135deg, #007bff, #0056b3);
-                    color: white;
-                    padding: 12px 24px;
-                    border: none;
-                    border-radius: 6px;
-                    cursor: pointer;
-                    font-weight: 600;
-                    margin-top: 20px;
-                }}
+                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
+                .error {{ background: #ffebee; padding: 30px; border-radius: 12px; border-left: 5px solid #f44336; }}
+                .status-icon {{ font-size: 4rem; margin-bottom: 15px; }}
+                button {{ background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; margin-top: 20px; }}
             </style>
         </head>
         <body>
             <div class="error">
-                <h2>❌ Search Failed</h2>
-                <p>Sorry, there was an error processing your query:</p>
-                <p><em>{str(e)}</em></p>
-                <a href="/"><button>← Back to Search</button></a>
+                <div class="status-icon">❌</div>
+                <h2>System Unhealthy</h2>
+                <p><strong>Error:</strong> {str(e)}</p>
+                <p>The system is experiencing issues and may not function properly.</p>
+                <a href="/"><button>← Back to Home</button></a>
             </div>
         </body>
         </html>
         """
         return error_html
-
-
-@app.get("/stats")
-async def get_database_stats():
-    """Get database statistics and collection information"""
-    try:
-        pipeline = get_pipeline()
-        stats = pipeline.get_stats()
-        return {
-            "status": "success",
-            "database_stats": stats,
-            "vector_store": {
-                "embedding_model": pipeline.embedding_generator.model_name,
-                "embedding_dimension": pipeline.embedding_generator.embedding_dim,
-                "table_name": pipeline.vector_store.table_name
-            }
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to get stats: {str(e)}")
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint to verify system status"""
-    try:
-        pipeline = get_pipeline()
-        stats = pipeline.get_stats()
-
-        # Check database connection
-        db_status = "healthy" if stats['total_chunks'] >= 0 else "error"
-
-        return {
-            "status": "healthy",
-            "timestamp": str(uuid.uuid1().time),
-            "components": {
-                "database": db_status,
-                "embedding_model": "loaded",
-                "vector_store": "operational"
-            },
-            "metrics": {
-                "total_documents": stats['total_documents'],
-                "total_chunks": stats['total_chunks']
-            }
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": str(uuid.uuid1().time)
-        }
 
 
 @app.get("/supported-types")
@@ -505,7 +589,7 @@ async def get_supported_types():
     return {
         "supported_extensions": config.file_validator.config.allowed_extensions,
         "max_file_size_mb": config.file_validator.config.max_file_size_mb,
-        "supported_types": ["pdf", "txt"],
+        "supported_types": ["pdf", "docx", "txt"],
         "vector_store_info": {
             "embedding_model": "all-MiniLM-L6-v2",
             "database_backend": "PostgreSQL + pgvector",
@@ -584,89 +668,6 @@ async def delete_table(table_name: str):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete table '{table_name}': {str(e)}"
-        )
-
-
-@app.post("/table/{table_name}/recreate")
-async def recreate_table(table_name: str):
-    """Recreate a specific table (delete and reinitialize)"""
-    if table_name not in ALLOWED_TABLES:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Recreation of table '{table_name}' not allowed. Allowed tables: {ALLOWED_TABLES}"
-        )
-
-    try:
-        pipeline_instance = get_pipeline(table_name)
-
-        # Get connection
-        conn = pipeline_instance.vector_store._get_connection()
-        old_row_count = 0
-
-        with conn.cursor() as cur:
-            # Check if table exists and get row count
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
-                    WHERE table_name = %s
-                );
-            """, (table_name,))
-
-            table_exists = cur.fetchone()[0]
-
-            if table_exists:
-                cur.execute(f"SELECT COUNT(*) FROM {table_name};")
-                old_row_count = cur.fetchone()[0]
-
-                # Drop the existing table
-                cur.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE;")
-
-            # Recreate table with proper structure
-            cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                text TEXT NOT NULL,
-                embedding vector(384),  -- Adjust dimension as needed
-                metadata JSONB,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-            """)
-
-            # Create indexes
-            cur.execute(f"""
-            CREATE INDEX IF NOT EXISTS {table_name}_embedding_idx
-            ON {table_name} USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100);
-            """)
-
-            cur.execute(f"""
-            CREATE INDEX IF NOT EXISTS {table_name}_document_id_idx
-            ON {table_name} (document_id);
-            """)
-
-        conn.commit()
-        conn.close()
-
-        # Reset pipeline if we recreated the current table
-        if table_name == pipeline_instance.vector_store.table_name:
-            config.pipeline = None
-
-        return {
-            "status": "success",
-            "message": f"Table '{table_name}' recreated successfully",
-            "table_name": table_name,
-            "previous_rows": old_row_count,
-            "current_rows": 0,
-            "timestamp": str(uuid.uuid1().time)
-        }
-
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to recreate table '{table_name}': {str(e)}"
         )
 
 

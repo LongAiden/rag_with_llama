@@ -24,22 +24,6 @@ GOOGLE_API_KEY=your_gemini_api_key
 bash deployment/setup.sh
 ```
 
-### 3. Manual Installation (Alternative)
-```bash
-# Install PostgreSQL and pgvector
-brew install postgresql pgvector
-
-# Install Python dependencies
-pip install fastapi uvicorn psycopg2-binary pgvector
-pip install sentence-transformers chonkie PyPDF2
-pip install google-generativeai python-dotenv pydantic
-
-# Start PostgreSQL and create database
-brew services start postgresql
-psql postgres -c "CREATE DATABASE rag_db;"
-psql rag_db -c "CREATE EXTENSION vector;"
-```
-
 ## 📁 Project Structure
 
 ```
@@ -94,6 +78,9 @@ rag_llama_index/
 
 ### `document_processing/full_pipeline_pgvector.py`
 **Purpose**: Main FastAPI application with web interface
+
+<img src="./images/fastapi.png" alt="FastAPI Interface" width="600">
+
 - **Key Endpoints**:
   - `GET /` - Web UI for upload/search
   - `POST /upload` - Document processing
@@ -119,12 +106,22 @@ rag_llama_index/
 cd document_processing
 python full_pipeline_pgvector.py
 ```
-Access at: `http://localhost:8000`
+Access webUI at: `http://localhost:8000`
+Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
 
 ### 2. Web Interface Usage
 1. **Upload Documents**: Select PDF/TXT files, configure chunking parameters
+    <img src="./images/home_screen.png" alt="Home Screen" width="600">
+
 2. **Search Documents**: Enter queries, adjust similarity thresholds
+    <img src="./images/query.png" alt="Query Interface" width="600">
+    <img src="./images/search_results.png" alt="Search Results" width="600">
+    <img src="./images/metadata.png" alt="Document Metadata" width="400">
+
 3. **Monitor System**: View stats and health status
+
+    <img src="./images/health_status.png" alt="Health Status" width="600">
+    <img src="./images/database.png" alt="Database Statistics" width="600">
 
 ### 3. API Usage Examples
 
