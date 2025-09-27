@@ -11,7 +11,9 @@ from templates import (
     SEARCH_RESULTS_HTML,
     SEARCH_ERROR_HTML,
     STATS_PAGE_HTML,
-    STATS_ERROR_HTML
+    STATS_ERROR_HTML,
+    HEALTH_CHECK_HTML,
+    HEALTH_ERROR_HTML
 )
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -359,228 +361,24 @@ async def health_check():
         status_icon = "✅" if db_status == "healthy" else "❌"
         status_color = "#28a745" if db_status == "healthy" else "#dc3545"
 
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Health Check - pgvector RAG</title>
-            <style>
-                body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    max-width: 800px;
-                    margin: 50px auto;
-                    padding: 20px;
-                    background: #f8f9fa;
-                    line-height: 1.6;
-                }}
-                .header {{
-                    background: white;
-                    padding: 20px;
-                    border-radius: 12px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                    margin-bottom: 20px;
-                    text-align: center;
-                }}
-                .status-main {{
-                    background: white;
-                    padding: 30px;
-                    border-radius: 12px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                    margin-bottom: 20px;
-                    text-align: center;
-                    border-left: 6px solid {status_color};
-                }}
-                .status-icon {{
-                    font-size: 4rem;
-                    margin-bottom: 15px;
-                }}
-                .status-text {{
-                    font-size: 1.5rem;
-                    font-weight: bold;
-                    color: {status_color};
-                    text-transform: uppercase;
-                    letter-spacing: 2px;
-                }}
-                .components-grid {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 15px;
-                    margin-bottom: 20px;
-                }}
-                .component-card {{
-                    background: white;
-                    padding: 20px;
-                    border-radius: 12px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                    text-align: center;
-                }}
-                .component-status {{
-                    font-size: 2rem;
-                    margin-bottom: 10px;
-                }}
-                .component-name {{
-                    font-weight: 600;
-                    color: #333;
-                    margin-bottom: 5px;
-                }}
-                .component-detail {{
-                    color: #666;
-                    font-size: 0.9rem;
-                }}
-                .metrics-section {{
-                    background: white;
-                    padding: 25px;
-                    border-radius: 12px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                    margin-bottom: 20px;
-                }}
-                .metrics-grid {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                    gap: 15px;
-                }}
-                .metric-item {{
-                    text-align: center;
-                    padding: 15px;
-                    background: #f8f9fa;
-                    border-radius: 8px;
-                }}
-                .metric-number {{
-                    font-size: 1.8rem;
-                    font-weight: bold;
-                    color: #007bff;
-                    margin-bottom: 5px;
-                }}
-                .metric-label {{
-                    color: #666;
-                    font-size: 0.85rem;
-                    text-transform: uppercase;
-                }}
-                button {{
-                    background: linear-gradient(135deg, #007bff, #0056b3);
-                    color: white;
-                    padding: 12px 24px;
-                    border: none;
-                    border-radius: 6px;
-                    cursor: pointer;
-                    font-weight: 600;
-                    text-decoration: none;
-                    display: inline-block;
-                    margin: 5px;
-                }}
-                h1 {{ color: #2c3e50; margin-bottom: 10px; }}
-                h2 {{ color: #34495e; margin-bottom: 15px; }}
-                .timestamp {{
-                    background: #e3f2fd;
-                    padding: 15px;
-                    border-radius: 8px;
-                    font-size: 14px;
-                    color: #666;
-                    text-align: center;
-                }}
-            </style>
-            <script>
-                // Auto-refresh every 30 seconds
-                setTimeout(() => {{
-                    location.reload();
-                }}, 30000);
-            </script>
-        </head>
-        <body>
-            <div class="header">
-                <h1>🏥 System Health Check</h1>
-                <p>Real-time status monitoring for your RAG system</p>
-                <a href="/"><button>← Back to Home</button></a>
-                <a href="/stats"><button>📊 View Statistics</button></a>
-            </div>
-
-            <div class="status-main">
-                <div class="status-icon">{status_icon}</div>
-                <div class="status-text">System {db_status.upper()}</div>
-            </div>
-
-            <div class="components-grid">
-                <div class="component-card">
-                    <div class="component-status">🗄️</div>
-                    <div class="component-name">Database</div>
-                    <div class="component-detail">PostgreSQL + pgvector</div>
-                    <div class="component-detail" style="color: {status_color}; font-weight: bold;">{db_status.upper()}</div>
-                </div>
-                <div class="component-card">
-                    <div class="component-status">🧠</div>
-                    <div class="component-name">Embedding Model</div>
-                    <div class="component-detail">{pipeline.embedding_generator.model_name}</div>
-                    <div class="component-detail" style="color: #28a745; font-weight: bold;">LOADED</div>
-                </div>
-                <div class="component-card">
-                    <div class="component-status">🔍</div>
-                    <div class="component-name">Vector Store</div>
-                    <div class="component-detail">Table: {pipeline.vector_store.table_name}</div>
-                    <div class="component-detail" style="color: #28a745; font-weight: bold;">OPERATIONAL</div>
-                </div>
-                <div class="component-card">
-                    <div class="component-status">🤖</div>
-                    <div class="component-name">LLM Service</div>
-                    <div class="component-detail">Gemini 2.0 Flash</div>
-                    <div class="component-detail" style="color: {'#28a745' if config.gemini_key else '#ffc107'}; font-weight: bold;">{'READY' if config.gemini_key else 'NOT CONFIGURED'}</div>
-                </div>
-            </div>
-
-            <div class="metrics-section">
-                <h2>📈 Quick Metrics</h2>
-                <div class="metrics-grid">
-                    <div class="metric-item">
-                        <div class="metric-number">{stats['total_documents']:,}</div>
-                        <div class="metric-label">Documents</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-number">{stats['total_chunks']:,}</div>
-                        <div class="metric-label">Chunks</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-number">{pipeline.embedding_generator.embedding_dim}</div>
-                        <div class="metric-label">Embedding Dim</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-number">{stats['avg_text_length']:.0f}</div>
-                        <div class="metric-label">Avg Text Length</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="timestamp">
-                <strong>Last Updated:</strong> {uuid.uuid1().time} | <strong>Auto-refresh:</strong> Every 30 seconds
-            </div>
-        </body>
-        </html>
-        """
+        html_content = HEALTH_CHECK_HTML.format(
+            status_color=status_color,
+            status_icon=status_icon,
+            db_status_upper=db_status.upper(),
+            embedding_model=pipeline.embedding_generator.model_name,
+            table_name=pipeline.vector_store.table_name,
+            llm_status_color='#28a745' if config.gemini_key else '#ffc107',
+            llm_status_text='READY' if config.gemini_key else 'NOT CONFIGURED',
+            total_documents=f"{stats['total_documents']:,}",
+            total_chunks=f"{stats['total_chunks']:,}",
+            embedding_dim=pipeline.embedding_generator.embedding_dim,
+            avg_text_length=f"{stats['avg_text_length']:.0f}",
+            timestamp=str(uuid.uuid1().time)
+        )
         return html_content
 
     except Exception as e:
-        error_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Health Check Error</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
-                .error {{ background: #ffebee; padding: 30px; border-radius: 12px; border-left: 5px solid #f44336; }}
-                .status-icon {{ font-size: 4rem; margin-bottom: 15px; }}
-                button {{ background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; margin-top: 20px; }}
-            </style>
-        </head>
-        <body>
-            <div class="error">
-                <div class="status-icon">❌</div>
-                <h2>System Unhealthy</h2>
-                <p><strong>Error:</strong> {str(e)}</p>
-                <p>The system is experiencing issues and may not function properly.</p>
-                <a href="/"><button>← Back to Home</button></a>
-            </div>
-        </body>
-        </html>
-        """
-        return error_html
+        return HEALTH_ERROR_HTML.format(error_message=str(e))
 
 
 @app.get("/supported-types")
