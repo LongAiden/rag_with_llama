@@ -118,13 +118,11 @@ async def generate_llm_response(query: str, context: str, results: list) -> Simp
     """Generate LLM response using Pydantic AI Agent or fallback"""
 
     # Calculate metadata
-    word_count_fallback = len(context.split()) if context else 0
     sources_used = len(results)
 
-    if config.agent:
-        try:
-            # Use Pydantic AI Agent for structured response
-            prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
+    try:
+        # Use Pydantic AI Agent for structured response
+        prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
 
 Context from documents:
 {context}
@@ -145,24 +143,24 @@ Please respond with:
 - sources_used: {sources_used}
 - metadata: Any additional relevant information"""
 
-            response = await config.agent.run(prompt)
-            return response
+        response = await config.agent.run(prompt)
+        return response
 
-        except Exception as llm_error:
-            print(f"Pydantic AI Agent failed: {llm_error}")
-            # Fallback to basic structured response
-            fallback_answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
-            for i, result in enumerate(results[:3]):
-                fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
+    except Exception as llm_error:
+        print(f"Pydantic AI Agent failed: {llm_error}")
+        # Fallback to basic structured response
+        fallback_answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
+        for i, result in enumerate(results[:3]):
+            fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
 
-            return SimpleRAGResponse(
-                answer=fallback_answer,
-                confidence=0.3,  # Low confidence due to fallback
-                word_count=len(fallback_answer.split()),
-                sources_used=sources_used,
-                metadata={"fallback_reason": str(
-                    llm_error), "method": "pydantic_ai_fallback"}
-            )
+    return SimpleRAGResponse(
+        answer=fallback_answer,
+        confidence=0.3,  # Low confidence due to fallback
+        word_count=len(fallback_answer.split()),
+        sources_used=sources_used,
+        metadata={"fallback_reason": str(
+            llm_error), "method": "pydantic_ai_fallback"}
+    )
 
 
 async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
