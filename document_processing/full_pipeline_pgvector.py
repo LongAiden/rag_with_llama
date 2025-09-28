@@ -1,3 +1,4 @@
+from models.models import QueryRequest, UploadResponse
 import os
 import sys
 import uuid
@@ -28,20 +29,22 @@ load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from models.models import QueryRequest, UploadResponse
 
 # Constants
-DEFAULT_TABLE_NAME = "document_chunks" # Changeable in webUI
-DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2" #
+DEFAULT_TABLE_NAME = "document_chunks"  # Changeable in webUI
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_CHUNKING_SIMILARITY = 0.5  # Default similarity threshold for chunking
 CHUNK_SIZE_LIMITS = (128, 2048)
 SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
-ALLOWED_CONTENT_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']
-ALLOWED_TABLES = ["document_chunks",'bert', "test1", "test2"]
+ALLOWED_CONTENT_TYPES = [
+    'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']
+ALLOWED_TABLES = ["document_chunks", 'bert', "test1", "test2"]
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
 # Global configuration
+
+
 class AppConfig:
     def __init__(self):
         self.db_params = {
@@ -66,16 +69,19 @@ class AppConfig:
                 print(f"❌ Gemini configuration failed: {e}")
         return None
 
+
 config = AppConfig()
 
 
-def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
+async def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
     if config.pipeline is None or config.pipeline.vector_store.table_name != table_name:
         config.pipeline = ChunkEmbeddingPipeline(
             db_params=config.db_params,
             embedding_model=DEFAULT_EMBEDDING_MODEL,
             table_name=table_name
         )
+        # Initialize the database for the new pipeline
+        await config.pipeline.vector_store._initialize_database()
     return config.pipeline
 
 
@@ -97,21 +103,20 @@ def generate_llm_response(query: str, context: str, results: list) -> str:
     """Generate LLM response using Gemini or fallback"""
     if config.gemini_key:
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
+                    Context from documents:
+                    {context}
 
-Context from documents:
-{context}
+                    User Question: {query}
 
-User Question: {query}
+                    Instructions:
+                    - Answer directly and accurately based on the provided context
+                    - If the context doesn't fully answer the question, clearly state what information is available
+                    - Cite specific sources when making claims
+                    - Be concise but thorough
 
-Instructions:
-- Answer directly and accurately based on the provided context
-- If the context doesn't fully answer the question, clearly state what information is available
-- Cite specific sources when making claims
-- Be concise but thorough
-
-Answer:"""
+                    Answer:"""
             response = model.generate_content(prompt)
             return response.text
         except Exception as llm_error:
@@ -129,12 +134,12 @@ Answer:"""
         return answer
 
 
-def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
+async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
     """Common document search logic"""
-    pipeline = get_pipeline(table_name)
+    pipeline = await get_pipeline(table_name)
 
     # Step 1: pgvector similarity search
-    results = pipeline.search_documents(
+    results = await pipeline.search_documents(
         query=query,
         limit=limit,
         threshold=threshold,
@@ -156,7 +161,8 @@ def perform_document_search(query: str, limit: int, threshold: float, document_i
         }
 
     # Step 2: Build context from retrieved chunks
-    context_parts = [f"[Source {i+1}]: {result['text']}" for i, result in enumerate(results)]
+    context_parts = [
+        f"[Source {i+1}]: {result['text']}" for i, result in enumerate(results)]
     context = "\n\n".join(context_parts)
 
     # Step 3: Generate response with LLM
@@ -227,8 +233,8 @@ async def upload_and_process(
             )
 
         # Process with pgvector pipeline using specified table
-        pipeline = get_pipeline(table_name)
-        processed_id = pipeline.process_document(
+        pipeline = await get_pipeline(table_name)
+        processed_id = await pipeline.process_document(
             file_path=str(temp_path),
             chunk_size=chunk_size,
             similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
@@ -266,7 +272,7 @@ async def upload_and_process(
 async def query_documents(request: QueryRequest):
     """Query documents using pgvector similarity search + LLM generation"""
     try:
-        result = perform_document_search(
+        result = await perform_document_search(
             query=request.query,
             limit=request.limit,
             threshold=request.threshold,
@@ -289,7 +295,7 @@ async def query_documents_form(
 ):
     """Query documents using form data (for HTML form submission)"""
     try:
-        result = perform_document_search(
+        result = await perform_document_search(
             query=query,
             limit=limit,
             threshold=threshold,
@@ -330,8 +336,8 @@ async def query_documents_form(
 async def get_database_stats():
     """Get database statistics and collection information"""
     try:
-        pipeline = get_pipeline()
-        stats = pipeline.get_stats()
+        pipeline = await get_pipeline()
+        stats = await pipeline.get_stats()
 
         # Use template with substitutions
         return STATS_PAGE_HTML.format(
@@ -353,8 +359,8 @@ async def get_database_stats():
 async def health_check():
     """Health check endpoint to verify system status"""
     try:
-        pipeline = get_pipeline()
-        stats = pipeline.get_stats()
+        pipeline = await get_pipeline()
+        stats = await pipeline.get_stats()
 
         # Check database connection
         db_status = "healthy" if stats['total_chunks'] >= 0 else "error"
@@ -406,45 +412,43 @@ async def delete_table(table_name: str):
         )
 
     try:
-        pipeline_instance = get_pipeline(table_name)
+        pipeline_instance = await get_pipeline(table_name)
 
         # Get connection and delete table quickly
-        conn = pipeline_instance.vector_store._get_connection()
+        conn = await pipeline_instance.vector_store._get_connection()
         row_count = 0
 
-        with conn.cursor() as cur:
-            # Check if table exists and get approximate row count in one query
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
-                    WHERE table_name = %s
-                ) as table_exists,
-                COALESCE((
-                    SELECT reltuples::bigint
-                    FROM pg_catalog.pg_class
-                    WHERE relname = %s
-                ), 0) as estimated_rows;
-            """, (table_name, table_name))
+        # Check if table exists and get approximate row count in one query
+        result = await conn.fetchrow("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = $1
+            ) as table_exists,
+            COALESCE((
+                SELECT reltuples::bigint
+                FROM pg_catalog.pg_class
+                WHERE relname = $1
+            ), 0) as estimated_rows;
+        """, table_name)
 
-            result = cur.fetchone()
-            table_exists = result[0]
-            row_count = result[1]  # Approximate count (much faster)
+        table_exists = result['table_exists']
+        row_count = result['estimated_rows']  # Approximate count (much faster)
 
-            if not table_exists:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Table '{table_name}' does not exist"
-                )
+        if not table_exists:
+            await conn.close()
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' does not exist"
+            )
 
-            # Two-step ultra-fast deletion: TRUNCATE then DROP
-            # Step 1: Instant data removal (no WAL overhead)
-            cur.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
+        # Two-step ultra-fast deletion: TRUNCATE then DROP
+        # Step 1: Instant data removal (no WAL overhead)
+        await conn.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
 
-            # Step 2: Clean schema removal
-            cur.execute(f"DROP TABLE {table_name} CASCADE;")
+        # Step 2: Clean schema removal
+        await conn.execute(f"DROP TABLE {table_name} CASCADE;")
 
-        conn.commit()
-        conn.close()
+        await conn.close()
 
         # Reset pipeline if we deleted the current table
         if table_name == pipeline_instance.vector_store.table_name:

@@ -2,16 +2,15 @@ import sys
 import os
 import json
 import uuid
-import psycopg2
+import asyncpg
 import numpy as np
 import PyPDF2
 from pathlib import Path
 from docx import Document
+import asyncio
 
-from pgvector.psycopg2 import register_vector
 from chonkie import SemanticChunker
 from sentence_transformers import SentenceTransformer
-from psycopg2.extras import execute_values
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -79,104 +78,108 @@ class VectorStore:
         """
         self.connection_params = connection_params
         self.table_name = table_name
-        self._initialize_database()
+        self.connection_string = self._build_connection_string()
+        self._initialized = False
 
-    def _get_connection(self):
+    def _build_connection_string(self) -> str:
+        """Build asyncpg connection string from parameters."""
+        return f"postgresql://{self.connection_params['user']}:{self.connection_params['password']}@{self.connection_params['host']}:{self.connection_params['port']}/{self.connection_params['dbname']}"
+
+    async def _get_connection(self):
         """Get database connection with pgvector support."""
-        conn = psycopg2.connect(**self.connection_params)
-        # Register pgvector types
-        register_vector(conn)
+        conn = await asyncpg.connect(self.connection_string)
+        # Enable pgvector extension
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         return conn
 
-    def _initialize_database(self):
+    async def _initialize_database(self):
         """Initialize database with pgvector extension and table."""
         try:
-            conn = self._get_connection()
-            with conn.cursor() as cur:
-                # Enable pgvector extension
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            if self._initialized:
+                return
 
-                # Create table with proper vector column
-                # Assuming 384-dimensional embeddings for all-MiniLM-L6-v2
-                # Adjust dimension based on your model
-                cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.table_name} (
-                    id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    embedding vector(384),  -- Adjust dimension as needed
-                    metadata JSONB,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                """)
+            conn = await self._get_connection()
 
-                # Create index for similarity search
-                cur.execute(f"""
-                CREATE INDEX IF NOT EXISTS {self.table_name}_embedding_idx 
-                ON {self.table_name} USING ivfflat (embedding vector_cosine_ops) 
-                WITH (lists = 100);
-                """)
+            # Create table with proper vector column
+            # Assuming 384-dimensional embeddings for all-MiniLM-L6-v2
+            # Adjust dimension based on your model
+            await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.table_name} (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                embedding vector(384),  -- Adjust dimension as needed
+                metadata JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
 
-                # Create index on document_id for filtering
-                cur.execute(f"""
-                CREATE INDEX IF NOT EXISTS {self.table_name}_document_id_idx 
-                ON {self.table_name} (document_id);
-                """)
+            # Create index for similarity search
+            await conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS {self.table_name}_embedding_idx
+            ON {self.table_name} USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+            """)
 
-            conn.commit()
-            conn.close()
+            # Create index on document_id for filtering
+            await conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS {self.table_name}_document_id_idx
+            ON {self.table_name} (document_id);
+            """)
+
+            await conn.close()
+            self._initialized = True
             print(f"Database initialized with table: {self.table_name}")
 
         except Exception as e:
             print(f"Error initializing database: {e}")
             raise
 
-    def add_chunks(self, chunks: List[Chunk], batch_size: int = 100):
+    async def add_chunks(self, chunks: List[Chunk], batch_size: int = 100):
         """Add chunks to vector store using batch insert for efficiency."""
         try:
-            conn = self._get_connection()
-            with conn.cursor() as cur:
-                # Prepare data for batch insert
-                chunk_data = []
-                for chunk in chunks:
-                    chunk_data.append((
-                        chunk.id,
-                        chunk.document_id,
-                        chunk.text,
-                        # Convert to numpy array for pgvector
-                        np.array(chunk.embedding),
-                        json.dumps(
-                            chunk.metadata) if chunk.metadata else json.dumps({})
-                    ))
+            if not self._initialized:
+                await self._initialize_database()
 
-                # Use execute_values for efficient batch insert
-                insert_sql = f"""
-                INSERT INTO {self.table_name} (id, document_id, text, embedding, metadata)
-                VALUES %s
-                ON CONFLICT (id) DO UPDATE SET
-                    document_id = EXCLUDED.document_id,
-                    text = EXCLUDED.text,
-                    embedding = EXCLUDED.embedding,
-                    metadata = EXCLUDED.metadata;
-                """
+            conn = await self._get_connection()
 
-                # Process in batches
-                for i in range(0, len(chunk_data), batch_size):
-                    batch = chunk_data[i:i + batch_size]
-                    execute_values(
-                        cur, insert_sql, batch,
-                        template=None, page_size=batch_size
-                    )
+            # Prepare data for batch insert
+            chunk_data = []
+            for chunk in chunks:
+                chunk_data.append((
+                    chunk.id,
+                    chunk.document_id,
+                    chunk.text,
+                    # Convert to list for asyncpg
+                    chunk.embedding,
+                    json.dumps(
+                        chunk.metadata) if chunk.metadata else json.dumps({})
+                ))
 
-            conn.commit()
-            conn.close()
+            # Use asyncpg's executemany for efficient batch insert
+            insert_sql = f"""
+            INSERT INTO {self.table_name} (id, document_id, text, embedding, metadata)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (id) DO UPDATE SET
+                document_id = EXCLUDED.document_id,
+                text = EXCLUDED.text,
+                embedding = EXCLUDED.embedding,
+                metadata = EXCLUDED.metadata;
+            """
+
+            # Process in batches
+            for i in range(0, len(chunk_data), batch_size):
+                batch = chunk_data[i:i + batch_size]
+                await conn.executemany(insert_sql, batch)
+
+            await conn.close()
             print(f"Added {len(chunks)} chunks to vector store")
 
         except Exception as e:
             print(f"Error adding chunks: {e}")
             raise
 
-    def search_similar_chunks(self, query_embedding: List[float],
+    async def search_similar_chunks(self, query_embedding: List[float],
                               limit: int = 5, threshold: float = 0.7,
                               document_ids: Optional[List[str]] = None) -> List[Dict]:
         """
@@ -192,64 +195,70 @@ class VectorStore:
             List of similar chunks with metadata
         """
         try:
-            conn = self._get_connection()
-            with conn.cursor() as cursor:
-                # Convert query embedding to numpy array
-                query_vector = np.array(query_embedding)
+            if not self._initialized:
+                await self._initialize_database()
 
-                # Build query with optional document filtering
-                base_query = f"""
-                    SELECT
-                        id,
-                        text,
-                        metadata,
-                        document_id,
-                        (1 - (embedding <=> %s)) as similarity
-                    FROM {self.table_name}
-                    WHERE (1 - (embedding <=> %s)) >= %s
-                """
+            conn = await self._get_connection()
 
-                params = [query_vector, query_vector, threshold]
+            # Build query with optional document filtering
+            base_query = f"""
+                SELECT
+                    id,
+                    text,
+                    metadata,
+                    document_id,
+                    (1 - (embedding <=> $1)) as similarity
+                FROM {self.table_name}
+                WHERE (1 - (embedding <=> $1)) >= $2
+            """
 
-                if document_ids:
-                    base_query += " AND document_id = ANY(%s)"
-                    params.append(document_ids)
+            params = [query_embedding, threshold]
 
+            if document_ids:
+                base_query += " AND document_id = ANY($3)"
+                params.append(document_ids)
                 base_query += """
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
+                    ORDER BY embedding <=> $1
+                    LIMIT $4
                 """
-                params.extend([query_vector, limit])
+                params.append(limit)
+            else:
+                base_query += """
+                    ORDER BY embedding <=> $1
+                    LIMIT $3
+                """
+                params.append(limit)
 
-                cursor.execute(base_query, params)
+            rows = await conn.fetch(base_query, *params)
 
-                results = []
-                for row in cursor.fetchall():
-                    results.append({
-                        'chunk_id': row[0],
-                        'text': row[1],
-                        'metadata': row[2] if isinstance(row[2], (dict, type(None))) else json.loads(row[2]),
-                        'document_id': row[3],
-                        'similarity': float(row[4])
-                    })
+            results = []
+            for row in rows:
+                results.append({
+                    'chunk_id': row['id'],
+                    'text': row['text'],
+                    'metadata': row['metadata'] if isinstance(row['metadata'], (dict, type(None))) else json.loads(row['metadata']),
+                    'document_id': row['document_id'],
+                    'similarity': float(row['similarity'])
+                })
 
-                conn.close()
-                return results
+            await conn.close()
+            return results
 
         except Exception as e:
             print(f"Error searching chunks: {e}")
             raise
 
-    def delete_document_chunks(self, document_id: str) -> int:
+    async def delete_document_chunks(self, document_id: str) -> int:
         """Delete all chunks for a specific document."""
         try:
-            conn = self._get_connection()
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"DELETE FROM {self.table_name} WHERE document_id = %s", (document_id,))
-                deleted_count = cur.rowcount
-            conn.commit()
-            conn.close()
+            if not self._initialized:
+                await self._initialize_database()
+
+            conn = await self._get_connection()
+            result = await conn.execute(
+                f"DELETE FROM {self.table_name} WHERE document_id = $1", document_id)
+            deleted_count = int(result.split()[-1]) if result else 0
+            await conn.close()
             print(
                 f"Deleted {deleted_count} chunks for document: {document_id}")
             return deleted_count
@@ -257,31 +266,32 @@ class VectorStore:
             print(f"Error deleting document chunks: {e}")
             raise
 
-    def get_collection_stats(self) -> Dict[str, Any]:
+    async def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the vector store."""
         try:
-            conn = self._get_connection()
-            with conn.cursor() as cur:
-                cur.execute(f"""
-                SELECT 
-                    COUNT(*) as total_chunks,
-                    COUNT(DISTINCT document_id) as total_documents,
-                    AVG(LENGTH(text)) as avg_text_length,
-                    MIN(created_at) as earliest_chunk,
-                    MAX(created_at) as latest_chunk
-                FROM {self.table_name}
-                """)
+            if not self._initialized:
+                await self._initialize_database()
 
-                row = cur.fetchone()
-                stats = {
-                    'total_chunks': row[0],
-                    'total_documents': row[1],
-                    'avg_text_length': float(row[2]) if row[2] else 0,
-                    'earliest_chunk': row[3].isoformat() if row[3] else None,
-                    'latest_chunk': row[4].isoformat() if row[4] else None
-                }
+            conn = await self._get_connection()
+            row = await conn.fetchrow(f"""
+            SELECT
+                COUNT(*) as total_chunks,
+                COUNT(DISTINCT document_id) as total_documents,
+                AVG(LENGTH(text)) as avg_text_length,
+                MIN(created_at) as earliest_chunk,
+                MAX(created_at) as latest_chunk
+            FROM {self.table_name}
+            """)
 
-            conn.close()
+            stats = {
+                'total_chunks': row['total_chunks'],
+                'total_documents': row['total_documents'],
+                'avg_text_length': float(row['avg_text_length']) if row['avg_text_length'] else 0,
+                'earliest_chunk': row['earliest_chunk'].isoformat() if row['earliest_chunk'] else None,
+                'latest_chunk': row['latest_chunk'].isoformat() if row['latest_chunk'] else None
+            }
+
+            await conn.close()
             return stats
         except Exception as e:
             print(f"Error getting stats: {e}")
@@ -295,7 +305,6 @@ class ChunkEmbeddingPipeline:
                  table_name: str):
         """
         Initialize the pipeline.
-
         Args:
             db_params: Database connection parameters
             embedding_model: SentenceTransformer model name
@@ -318,15 +327,15 @@ class ChunkEmbeddingPipeline:
         """Extract text from DOCX file."""
         try:
             from docx import Document
-            
+
             doc = Document(docx_path)
             text_parts = []
-            
+
             # Extract from paragraphs
             for paragraph in doc.paragraphs:
                 if paragraph.text.strip():  # Skip empty paragraphs
                     text_parts.append(paragraph.text)
-            
+
             # Extract from tables
             for table in doc.tables:
                 table_text = []
@@ -334,9 +343,9 @@ class ChunkEmbeddingPipeline:
                     row_text = [cell.text.strip() for cell in row.cells]
                     table_text.append(" | ".join(row_text))
                 text_parts.append("\n".join(table_text))
-            
+
             return "\n\n".join(text_parts)
-            
+
         except Exception as e:
             print(f"Error extracting text from DOCX: {e}")
             raise ValueError(f"Failed to extract text from DOCX file: {e}")
@@ -345,7 +354,6 @@ class ChunkEmbeddingPipeline:
                    similarity_threshold: float = 0.5) -> List:
         """
         Chunk text using Chonkie SemanticChunker.
-
         Args:
             text: Input text to chunk
             chunk_size: Maximum tokens per chunk
@@ -445,17 +453,16 @@ class ChunkEmbeddingPipeline:
 
         # Use your add_chunks method with pgvector
         print("Inserting chunks into database using pgvector...")
-        self.vector_store.add_chunks(chunk_objects)
+        await self.vector_store.add_chunks(chunk_objects)
 
         print(
             f"Successfully processed {filename} -> Document ID: {document_id}")
         return document_id
 
-    def search_documents(self, query: str, limit: int = 5, threshold: float = 0.7,
+    async def search_documents(self, query: str, limit: int = 5, threshold: float = 0.7,
                          document_ids: Optional[List[str]] = None) -> List[Dict]:
         """
         Search for relevant document chunks using pgvector.
-
         Args:
             query: Search query
             limit: Maximum number of results
@@ -466,14 +473,14 @@ class ChunkEmbeddingPipeline:
             List of relevant chunks
         """
         query_embedding = self.embedding_generator.embed_text(query)
-        return self.vector_store.search_similar_chunks(
+        return await self.vector_store.search_similar_chunks(
             query_embedding, limit, threshold, document_ids
         )
 
-    def delete_document(self, document_id: str) -> int:
+    async def delete_document(self, document_id: str) -> int:
         """Delete all chunks for a document."""
-        return self.vector_store.delete_document_chunks(document_id)
+        return await self.vector_store.delete_document_chunks(document_id)
 
-    def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> Dict[str, Any]:
         """Get vector store statistics."""
-        return self.vector_store.get_collection_stats()
+        return await self.vector_store.get_collection_stats()
