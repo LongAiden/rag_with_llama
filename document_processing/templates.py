@@ -301,7 +301,9 @@ SEARCH_RESULTS_HTML = """
         • Average similarity: {avg_similarity}<br>
         • Search method: {search_method}<br>
         • Table used: {table_used}<br>
-        • Threshold: {threshold_used}
+        • Threshold: {threshold_used}<br>
+        • Response confidence: {confidence}<br>
+        • Response word count: {word_count}
     </div>
 </body>
 </html>

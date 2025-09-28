@@ -1,10 +1,13 @@
-from models.models import QueryRequest, UploadResponse
+from models.models import QueryRequest, UploadResponse, RAGResponse, SimpleRAGResponse, RAGSource, RAGResponseMetadata
 import os
 import sys
 import uuid
 from pathlib import Path
 
 import google.generativeai as genai
+from pydantic_ai import Agent
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 from file_validator import FileValidator, FileValidationConfig
 from embed_chunks_to_db import ChunkEmbeddingPipeline
 from templates import (
@@ -55,19 +58,31 @@ class AppConfig:
             'password': os.getenv('POSTGRES_PASSWORD', 'admin')
         }
         self.file_validator = FileValidator(FileValidationConfig())
-        self.gemini_key = self._configure_gemini()
+        self.gemini_key, self.agent = self._configure_pydantic_ai()
         self.pipeline = None
 
-    def _configure_gemini(self):
+    def _configure_pydantic_ai(self):
         gemini_key = os.getenv('GOOGLE_API_KEY')
         if gemini_key:
             try:
-                genai.configure(api_key=gemini_key)
-                print("✓ Gemini configured successfully")
-                return gemini_key
+                # Configure Pydantic AI Agent with GoogleProvider
+                provider = GoogleProvider(api_key=gemini_key)
+                model = GoogleModel('gemini-2.5-flash', provider=provider)
+                agent = Agent(model, result_type=SimpleRAGResponse)
+
+                # Test the agent with a simple query
+                print("✓ Pydantic AI Agent configured successfully")
+                return gemini_key, agent
             except Exception as e:
-                print(f"❌ Gemini configuration failed: {e}")
-        return None
+                print(f"❌ Pydantic AI configuration failed: {e}")
+                # Fallback to direct genai for backward compatibility
+                try:
+                    genai.configure(api_key=gemini_key)
+                    print("✓ Fallback to direct Gemini API")
+                    return gemini_key, None
+                except Exception as fallback_error:
+                    print(f"❌ Gemini fallback also failed: {fallback_error}")
+        return None, None
 
 
 config = AppConfig()
@@ -99,39 +114,55 @@ def validate_upload_params(chunk_size: int, content_type: str):
         )
 
 
-def generate_llm_response(query: str, context: str, results: list) -> str:
-    """Generate LLM response using Gemini or fallback"""
-    if config.gemini_key:
+async def generate_llm_response(query: str, context: str, results: list) -> SimpleRAGResponse:
+    """Generate LLM response using Pydantic AI Agent or fallback"""
+
+    # Calculate metadata
+    word_count_fallback = len(context.split()) if context else 0
+    sources_used = len(results)
+
+    if config.agent:
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            # Use Pydantic AI Agent for structured response
             prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
-                    Context from documents:
-                    {context}
 
-                    User Question: {query}
+Context from documents:
+{context}
 
-                    Instructions:
-                    - Answer directly and accurately based on the provided context
-                    - If the context doesn't fully answer the question, clearly state what information is available
-                    - Cite specific sources when making claims
-                    - Be concise but thorough
+User Question: {query}
 
-                    Answer:"""
-            response = model.generate_content(prompt)
-            return response.text
+Instructions:
+- Answer directly and accurately based on the provided context
+- If the context doesn't fully answer the question, clearly state what information is available
+- Cite specific sources when making claims
+- Be concise but thorough
+- Provide a confidence score (0-1) based on how well the context answers the question
+
+Please respond with:
+- answer: Your comprehensive response
+- confidence: Float between 0-1 indicating confidence in the answer
+- word_count: Number of words in your answer
+- sources_used: {sources_used}
+- metadata: Any additional relevant information"""
+
+            response = await config.agent.run(prompt)
+            return response
+
         except Exception as llm_error:
-            # Fallback if LLM fails
-            answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
+            print(f"Pydantic AI Agent failed: {llm_error}")
+            # Fallback to basic structured response
+            fallback_answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
             for i, result in enumerate(results[:3]):
-                answer += f"{i+1}. {result['text'][:300]}...\n\n"
-            return answer
-    else:
-        # Fallback without LLM
-        answer = f"Found {len(results)} relevant document chunks (LLM not configured):\n\n"
-        for i, result in enumerate(results):
-            similarity_pct = f"{result['similarity']*100:.1f}%"
-            answer += f"**Source {i+1}** (similarity: {similarity_pct}):\n{result['text'][:400]}...\n\n"
-        return answer
+                fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
+
+            return SimpleRAGResponse(
+                answer=fallback_answer,
+                confidence=0.3,  # Low confidence due to fallback
+                word_count=len(fallback_answer.split()),
+                sources_used=sources_used,
+                metadata={"fallback_reason": str(
+                    llm_error), "method": "pydantic_ai_fallback"}
+            )
 
 
 async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
@@ -147,18 +178,20 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
     )
 
     if not results:
-        return {
-            "query": query,
-            "answer": "No relevant documents found with the specified similarity threshold.",
-            "sources": [],
-            "table_used": table_name,
-            "search_stats": {
-                "chunks_found": 0,
-                "avg_similarity": 0.0,
-                "search_method": "pgvector_cosine",
-                "threshold_used": threshold
-            }
-        }
+        return RAGResponse(
+            query=query,
+            answer="No relevant documents found with the specified similarity threshold.",
+            sources=[],
+            search_stats=RAGResponseMetadata(
+                chunks_found=0,
+                avg_similarity=0.0,
+                search_method="pgvector_cosine",
+                threshold_used=threshold,
+                word_count=9,  # word count of the no-results message
+                confidence=0.0
+            ),
+            table_used=table_name
+        )
 
     # Step 2: Build context from retrieved chunks
     context_parts = [
@@ -166,31 +199,35 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
     context = "\n\n".join(context_parts)
 
     # Step 3: Generate response with LLM
-    answer = generate_llm_response(query, context, results)
+    llm_response = await generate_llm_response(query, context, results)
 
     # Calculate search statistics
     avg_similarity = sum(r['similarity'] for r in results) / len(results)
 
-    return {
-        "query": query,
-        "answer": answer,
-        "table_used": table_name,
-        "sources": [
-            {
-                "chunk_id": r['chunk_id'],
-                "text": r['text'][:300] + "..." if len(r['text']) > 300 else r['text'],
-                "similarity": round(r['similarity'], 3),
-                "document_id": r['document_id'],
-                "metadata": r.get('metadata', {})
-            } for r in results
+    # Create structured response
+    return RAGResponse(
+        query=query,
+        answer=llm_response.answer,
+        sources=[
+            RAGSource(
+                chunk_id=r['chunk_id'],
+                text=r['text'][:300] +
+                "..." if len(r['text']) > 300 else r['text'],
+                similarity=round(r['similarity'], 3),
+                document_id=r['document_id'],
+                metadata=r.get('metadata', {})
+            ) for r in results
         ],
-        "search_stats": {
-            "chunks_found": len(results),
-            "avg_similarity": round(avg_similarity, 3),
-            "search_method": "pgvector_cosine",
-            "threshold_used": threshold
-        }
-    }
+        search_stats=RAGResponseMetadata(
+            chunks_found=len(results),
+            avg_similarity=round(avg_similarity, 3),
+            search_method="pgvector_cosine",
+            threshold_used=threshold,
+            word_count=llm_response.word_count,
+            confidence=llm_response.confidence
+        ),
+        table_used=table_name
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -268,7 +305,7 @@ async def upload_and_process(
         temp_path.unlink(missing_ok=True)
 
 
-@app.post("/query")
+@app.post("/query", response_model=RAGResponse)
 async def query_documents(request: QueryRequest):
     """Query documents using pgvector similarity search + LLM generation"""
     try:
@@ -279,8 +316,7 @@ async def query_documents(request: QueryRequest):
             document_ids=request.document_ids,
             table_name=DEFAULT_TABLE_NAME
         )
-        # Remove table_used from result for API consistency
-        result.pop('table_used', None)
+        # Return the structured RAGResponse directly
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
@@ -306,23 +342,25 @@ async def query_documents_form(
         # Build sources HTML
         sources_html = ''.join([f"""
         <div class="source-item">
-            <strong>Source {i+1}</strong> (Similarity: {source['similarity']:.1%})<br>
-            <em>Document: {source['document_id'][:8]}...</em><br><br>
-            {source['text']}
+            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%})<br>
+            <em>Document: {source.document_id[:8]}...</em><br><br>
+            {source.text}
         </div>
-        """ for i, source in enumerate(result['sources'])])
+        """ for i, source in enumerate(result.sources)])
 
         # Use template with substitutions
         html_content = SEARCH_RESULTS_HTML.format(
             query=query,
-            answer=result['answer'].replace('\n', '<br>'),
-            source_count=len(result['sources']),
+            answer=result.answer.replace('\n', '<br>'),
+            source_count=len(result.sources),
             sources_html=sources_html,
-            chunks_found=result['search_stats']['chunks_found'],
-            avg_similarity=f"{result['search_stats']['avg_similarity']:.1%}",
-            search_method=result['search_stats']['search_method'],
-            table_used=result['table_used'],
-            threshold_used=f"{result['search_stats']['threshold_used']:.1%}"
+            chunks_found=result.search_stats.chunks_found,
+            avg_similarity=f"{result.search_stats.avg_similarity:.1%}",
+            search_method=result.search_stats.search_method,
+            table_used=result.table_used,
+            threshold_used=f"{result.search_stats.threshold_used:.1%}",
+            confidence=f"{result.search_stats.confidence:.1%}" if result.search_stats.confidence else "N/A",
+            word_count=result.search_stats.word_count or 0
         )
 
         return html_content
