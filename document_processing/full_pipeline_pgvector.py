@@ -6,6 +6,7 @@ from pathlib import Path
 # Disable tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import logfire
 import google.generativeai as genai
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
@@ -53,6 +54,15 @@ app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
 class AppConfig:
     def __init__(self):
+        # Initialize logfire with token from environment
+        logfire_token = os.getenv('LOGFIRE_WRITE_TOKEN')
+        if logfire_token:
+            logfire.configure(token=logfire_token)
+            print("✓ Logfire configured successfully")
+        else:
+            print("⚠️ LOGFIRE_WRITE_TOKEN not found, using default configuration")
+            logfire.configure()
+
         self.db_params = {
             'host': os.getenv('DB_HOST', 'localhost'),
             'port': os.getenv('DB_PORT', '5432'),
@@ -143,122 +153,161 @@ async def generate_llm_response(query: str, context: str, results: list) -> Simp
     # Calculate metadata
     sources_used = len(results)
 
-    try:
-        # Check if agent is configured
-        if config.agent is None:
-            raise Exception("Pydantic AI Agent is not configured - missing GOOGLE_API_KEY or configuration failed")
+    with logfire.span("llm_response_generation",
+                     query=query[:100],  # Truncate long queries
+                     sources_used=sources_used,
+                     context_length=len(context)):
 
-        # Use Pydantic AI Agent for structured response with proper user message
-        user_message = f"""Context from documents:
+        logfire.info("Starting LLM response generation",
+                    query_length=len(query),
+                    context_length=len(context),
+                    sources_used=sources_used)
+
+        try:
+            # Check if agent is configured
+            if config.agent is None:
+                raise Exception("Pydantic AI Agent is not configured - missing GOOGLE_API_KEY or configuration failed")
+
+            # Use Pydantic AI Agent for structured response with proper user message
+            user_message = f"""Context from documents:
 {context}
 
 User Question: {query}
 
 Sources used: {sources_used}"""
 
-        response = await config.agent.run(user_message)
+            response = await config.agent.run(user_message)
 
-        # The agent now returns a structured SimpleRAGResponse directly
-        if hasattr(response, 'output') and isinstance(response.output, SimpleRAGResponse):
-            # Update sources_used if not set correctly by the model
-            if response.output.sources_used != sources_used:
-                response.output.sources_used = sources_used
-            return response.output
-        else:
-            # Fallback if response structure is unexpected
-            answer_text = response.output if hasattr(response, 'output') else str(response)
+            # The agent now returns a structured SimpleRAGResponse directly
+            if hasattr(response, 'output') and isinstance(response.output, SimpleRAGResponse):
+                # Update sources_used if not set correctly by the model
+                if response.output.sources_used != sources_used:
+                    response.output.sources_used = sources_used
+
+                logfire.info("LLM response generated successfully",
+                            word_count=response.output.word_count,
+                            confidence=response.output.confidence,
+                            method="pydantic_ai_agent")
+
+                return response.output
+            else:
+                # Fallback if response structure is unexpected
+                answer_text = response.output if hasattr(response, 'output') else str(response)
+
+                logfire.warn("Unexpected response structure, using fallback",
+                            response_type=type(response).__name__)
+
+                return SimpleRAGResponse(
+                    answer=answer_text,
+                    confidence=0.8,
+                    word_count=len(answer_text.split()),
+                    sources_used=sources_used,
+                    metadata={"method": "pydantic_ai_agent_fallback", "model": "gemini-2.5-flash"}
+                )
+
+        except Exception as llm_error:
+            logfire.error("LLM generation failed, using fallback",
+                         error=str(llm_error),
+                         error_type=type(llm_error).__name__)
+
+            print(f"Pydantic AI Agent failed: {llm_error}")
+            # Fallback to basic structured response
+            fallback_answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
+            for i, result in enumerate(results[:3]):
+                fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
+
             return SimpleRAGResponse(
-                answer=answer_text,
-                confidence=0.8,
-                word_count=len(answer_text.split()),
+                answer=fallback_answer,
+                confidence=0.3,  # Low confidence due to fallback
+                word_count=len(fallback_answer.split()),
                 sources_used=sources_used,
-                metadata={"method": "pydantic_ai_agent_fallback", "model": "gemini-2.5-flash"}
+                metadata={"fallback_reason": str(
+                    llm_error), "method": "pydantic_ai_fallback"}
             )
-
-    except Exception as llm_error:
-        print(f"Pydantic AI Agent failed: {llm_error}")
-        # Fallback to basic structured response
-        fallback_answer = f"LLM generation failed ({str(llm_error)}), but found {len(results)} relevant chunks:\n\n"
-        for i, result in enumerate(results[:3]):
-            fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
-
-        return SimpleRAGResponse(
-            answer=fallback_answer,
-            confidence=0.3,  # Low confidence due to fallback
-            word_count=len(fallback_answer.split()),
-            sources_used=sources_used,
-            metadata={"fallback_reason": str(
-                llm_error), "method": "pydantic_ai_fallback"}
-        )
 
 
 async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
     """Common document search logic"""
     pipeline = await get_pipeline(table_name)
 
-    # Step 1: pgvector similarity search
-    results = await pipeline.search_documents(
-        query=query,
-        limit=limit,
-        threshold=threshold,
-        document_ids=document_ids
-    )
+    with logfire.span("document_search",
+                     query=query[:100],  # Truncate long queries for logging
+                     limit=limit,
+                     threshold=threshold,
+                     table_name=table_name):
 
-    if not results:
+        # Step 1: pgvector similarity search
+        with logfire.span("embedding_generation_for_search"):
+            logfire.info("Generating embeddings for search query",
+                        query_length=len(query),
+                        embedding_model=pipeline.embedding_generator.model_name)
+
+            results = await pipeline.search_documents(
+                query=query,
+                limit=limit,
+                threshold=threshold,
+                document_ids=document_ids
+            )
+
+            logfire.info("Search completed",
+                        results_found=len(results),
+                        avg_similarity=sum(r['similarity'] for r in results) / len(results) if results else 0)
+
+        if not results:
+            return RAGResponse(
+                query=query,
+                answer="No relevant documents found with the specified similarity threshold.",
+                sources=[],
+                search_stats=RAGResponseMetadata(
+                    chunks_found=0,
+                    avg_similarity=0.0,
+                    search_method="pgvector_cosine",
+                    threshold_used=threshold,
+                    word_count=9,  # word count of the no-results message
+                    confidence=0.0
+                ),
+                table_used=table_name
+            )
+
+        # Step 2: Build context from retrieved chunks with page numbers
+        context_parts = []
+        for i, result in enumerate(results):
+            page_info = ""
+            if result.get('metadata') and result['metadata'].get('page_number'):
+                page_info = f" (Page {result['metadata']['page_number']})"
+            context_parts.append(f"[Source {i+1}{page_info}]: {result['text']}")
+        context = "\n\n".join(context_parts)
+
+        # Step 3: Generate response with LLM
+        llm_response = await generate_llm_response(query, context, results)
+
+        # Calculate search statistics
+        avg_similarity = sum(r['similarity'] for r in results) / len(results)
+
+        # Create structured response
         return RAGResponse(
             query=query,
-            answer="No relevant documents found with the specified similarity threshold.",
-            sources=[],
+            answer=llm_response.answer,
+            sources=[
+                RAGSource(
+                    chunk_id=r['chunk_id'],
+                    text=r['text'],
+                    similarity=round(r['similarity'], 3),
+                    document_id=r['document_id'],
+                    page_number=r.get('metadata', {}).get('page_number'),
+                    metadata=r.get('metadata', {})
+                ) for r in results
+            ],
             search_stats=RAGResponseMetadata(
-                chunks_found=0,
-                avg_similarity=0.0,
+                chunks_found=len(results),
+                avg_similarity=round(avg_similarity, 3),
                 search_method="pgvector_cosine",
                 threshold_used=threshold,
-                word_count=9,  # word count of the no-results message
-                confidence=0.0
+                word_count=llm_response.word_count,
+                confidence=llm_response.confidence
             ),
             table_used=table_name
         )
-
-    # Step 2: Build context from retrieved chunks with page numbers
-    context_parts = []
-    for i, result in enumerate(results):
-        page_info = ""
-        if result.get('metadata') and result['metadata'].get('page_number'):
-            page_info = f" (Page {result['metadata']['page_number']})"
-        context_parts.append(f"[Source {i+1}{page_info}]: {result['text']}")
-    context = "\n\n".join(context_parts)
-
-    # Step 3: Generate response with LLM
-    llm_response = await generate_llm_response(query, context, results)
-
-    # Calculate search statistics
-    avg_similarity = sum(r['similarity'] for r in results) / len(results)
-
-    # Create structured response
-    return RAGResponse(
-        query=query,
-        answer=llm_response.answer,
-        sources=[
-            RAGSource(
-                chunk_id=r['chunk_id'],
-                text=r['text'],
-                similarity=round(r['similarity'], 3),
-                document_id=r['document_id'],
-                page_number=r.get('metadata', {}).get('page_number'),
-                metadata=r.get('metadata', {})
-            ) for r in results
-        ],
-        search_stats=RAGResponseMetadata(
-            chunks_found=len(results),
-            avg_similarity=round(avg_similarity, 3),
-            search_method="pgvector_cosine",
-            threshold_used=threshold,
-            word_count=llm_response.word_count,
-            confidence=llm_response.confidence
-        ),
-        table_used=table_name
-    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -302,19 +351,34 @@ async def upload_and_process(
 
         # Process with pgvector pipeline using specified table
         pipeline = await get_pipeline(table_name)
-        processed_id = await pipeline.process_document(
-            file_path=str(temp_path),
-            chunk_size=chunk_size,
-            similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
-            document_id=document_id,
-            metadata={
-                'filename': file.filename,
-                'content_type': file.content_type,
-                'file_size': validation_result.file_size,
-                'upload_timestamp': str(uuid.uuid1().time),
-                'validation_passed': True
-            }
-        )
+
+        with logfire.span("document_insertion",
+                         document_id=document_id,
+                         filename=file.filename,
+                         chunk_size=chunk_size,
+                         table_name=table_name):
+            logfire.info("Starting document processing",
+                        document_id=document_id,
+                        filename=file.filename,
+                        file_size=validation_result.file_size)
+
+            processed_id = await pipeline.process_document(
+                file_path=str(temp_path),
+                chunk_size=chunk_size,
+                similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
+                document_id=document_id,
+                metadata={
+                    'filename': file.filename,
+                    'content_type': file.content_type,
+                    'file_size': validation_result.file_size,
+                    'upload_timestamp': str(uuid.uuid1().time),
+                    'validation_passed': True
+                }
+            )
+
+            logfire.info("Document processing completed successfully",
+                        document_id=processed_id,
+                        filename=file.filename)
 
         return UploadResponse(
             status="success",
