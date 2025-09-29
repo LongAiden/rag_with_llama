@@ -165,7 +165,7 @@ def process_document(file_path, chunk_size=512, similarity_threshold=0.5, embedd
         similarity_threshold (float): Similarity threshold for semantic chunking
         embedding_model: Custom embedding model
     Returns:
-        tuple: (chunks, page_mapping) where chunks have page number metadata
+        list: chunks with page number metadata attached
     """
     from pathlib import Path
 
@@ -203,4 +203,4 @@ def process_document(file_path, chunk_size=512, similarity_threshold=0.5, embedd
         else:
             chunk.page_number = 1  # Default to page 1 if no position info
 
-    return chunks, page_mapping
+    return chunks
