@@ -50,6 +50,7 @@ class FileValidationConfig(BaseModel):
 class RAGSource(BaseModel):
     """Information about a source used in RAG response."""
     chunk_id: str = Field(description="Unique identifier for the source chunk")
+    text: str = Field(description="Text content of the chunk")
     similarity: float = Field(
         ge=0, le=1, description="Similarity score to query")
     document_id: str = Field(description="Document this chunk comes from")

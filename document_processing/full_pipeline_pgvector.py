@@ -1,8 +1,10 @@
-from models.models import QueryRequest, UploadResponse, RAGResponse, SimpleRAGResponse, RAGSource, RAGResponseMetadata
 import os
 import sys
 import uuid
 from pathlib import Path
+
+# Disable tokenizers parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import google.generativeai as genai
 from pydantic_ai import Agent
@@ -32,6 +34,7 @@ load_dotenv(os.path.join(script_dir, '../deployment/.env'))
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from models.models import QueryRequest, UploadResponse, RAGResponse, SimpleRAGResponse, RAGSource, RAGResponseMetadata
 
 # Constants
 DEFAULT_TABLE_NAME = "document_chunks"  # Changeable in webUI
@@ -69,10 +72,10 @@ class AppConfig:
                 provider = GoogleProvider(api_key=gemini_key)
                 model = GoogleModel('gemini-2.5-flash', provider=provider)
 
-                # Create agent with system prompt and result type
+                # Create agent with system prompt and output type
                 agent = Agent(
                     model,
-                    result_type=SimpleRAGResponse,
+                    output_type=SimpleRAGResponse,
                     system_prompt="""You are a helpful RAG (Retrieval-Augmented Generation) assistant.
                     Based on the provided context from document search, provide comprehensive answers to user questions.
 
@@ -141,6 +144,10 @@ async def generate_llm_response(query: str, context: str, results: list) -> Simp
     sources_used = len(results)
 
     try:
+        # Check if agent is configured
+        if config.agent is None:
+            raise Exception("Pydantic AI Agent is not configured - missing GOOGLE_API_KEY or configuration failed")
+
         # Use Pydantic AI Agent for structured response with proper user message
         user_message = f"""Context from documents:
 {context}
@@ -151,23 +158,21 @@ Sources used: {sources_used}"""
 
         response = await config.agent.run(user_message)
 
-        # Ensure we always return SimpleRAGResponse type
-        if isinstance(response, SimpleRAGResponse):
+        # The agent now returns a structured SimpleRAGResponse directly
+        if hasattr(response, 'output') and isinstance(response.output, SimpleRAGResponse):
             # Update sources_used if not set correctly by the model
-            if response.sources_used != sources_used:
-                response.sources_used = sources_used
-            return response
+            if response.output.sources_used != sources_used:
+                response.output.sources_used = sources_used
+            return response.output
         else:
-            # If the agent didn't return the expected type, create a proper response
-            answer_text = str(response) if hasattr(
-                response, '__str__') else "Response type error"
+            # Fallback if response structure is unexpected
+            answer_text = response.output if hasattr(response, 'output') else str(response)
             return SimpleRAGResponse(
                 answer=answer_text,
-                confidence=0.5,
+                confidence=0.8,
                 word_count=len(answer_text.split()),
                 sources_used=sources_used,
-                metadata={"note": "Response type converted",
-                          "method": "pydantic_ai_converted"}
+                metadata={"method": "pydantic_ai_agent_fallback", "model": "gemini-2.5-flash"}
             )
 
     except Exception as llm_error:
@@ -237,6 +242,7 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
         sources=[
             RAGSource(
                 chunk_id=r['chunk_id'],
+                text=r['text'],
                 similarity=round(r['similarity'], 3),
                 document_id=r['document_id'],
                 page_number=r.get('metadata', {}).get('page_number'),

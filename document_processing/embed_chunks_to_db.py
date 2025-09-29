@@ -9,6 +9,9 @@ from pathlib import Path
 from docx import Document
 import asyncio
 
+# Disable tokenizers parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from chonkie import SemanticChunker
 from sentence_transformers import SentenceTransformer
 
@@ -153,12 +156,14 @@ class VectorStore:
             # Prepare data for batch insert
             chunk_data = []
             for chunk in chunks:
+                # Convert embedding list to proper pgvector format
+                embedding_str = '[' + ','.join(map(str, chunk.embedding)) + ']'
+
                 chunk_data.append((
                     chunk.id,
                     chunk.document_id,
                     chunk.text,
-                    # Convert to list for asyncpg
-                    chunk.embedding,
+                    embedding_str,
                     json.dumps(
                         chunk.metadata) if chunk.metadata else json.dumps({})
                 ))
@@ -219,7 +224,9 @@ class VectorStore:
                 WHERE (1 - (embedding <=> $1)) >= $2
             """
 
-            params = [query_embedding, threshold]
+            # Convert query embedding to proper pgvector format
+            query_embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            params = [query_embedding_str, threshold]
 
             if document_ids:
                 base_query += " AND document_id = ANY($3)"
