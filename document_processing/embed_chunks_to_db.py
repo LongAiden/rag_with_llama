@@ -370,7 +370,7 @@ class ChunkEmbeddingPipeline:
         )
         return chunker.chunk(text)
 
-    def process_document(self, file_path: str, chunk_size: int = 512,
+    async def process_document(self, file_path: str, chunk_size: int = 512,
                          similarity_threshold: float = 0.5,
                          document_id: str = None, metadata: Dict = None) -> str:
         """
