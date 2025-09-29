@@ -58,7 +58,7 @@ class AppConfig:
             'password': os.getenv('POSTGRES_PASSWORD', 'admin')
         }
         self.file_validator = FileValidator(FileValidationConfig())
-        self.gemini_key, self.agent = self._configure_pydantic_ai()
+        self.agent = self._configure_pydantic_ai()
         self.pipeline = None
 
     def _configure_pydantic_ai(self):
@@ -68,21 +68,41 @@ class AppConfig:
                 # Configure Pydantic AI Agent with GoogleProvider
                 provider = GoogleProvider(api_key=gemini_key)
                 model = GoogleModel('gemini-2.5-flash', provider=provider)
-                agent = Agent(model, result_type=SimpleRAGResponse)
+
+                # Create agent with system prompt and result type
+                agent = Agent(
+                    model,
+                    result_type=SimpleRAGResponse,
+                    system_prompt="""You are a helpful RAG (Retrieval-Augmented Generation) assistant.
+                    Based on the provided context from document search, provide comprehensive answers to user questions.
+
+                    Instructions:
+                    - Answer directly and accurately based on the provided context
+                    - If the context doesn't fully answer the question, clearly state what information is available
+                    - Cite specific sources when making claims
+                    - Be concise but thorough
+                    - Provide a confidence score (0-1) based on how well the context answers the question
+
+                    Respond with:
+                    - answer: Your comprehensive response
+                    - confidence: Float between 0-1 indicating confidence in the answer
+                    - word_count: Number of words in your answer
+                    - sources_used: Number of sources used (will be provided)
+                    - metadata: Any additional relevant information"""
+                )
 
                 # Test the agent with a simple query
                 print("✓ Pydantic AI Agent configured successfully")
-                return gemini_key, agent
+                return agent
             except Exception as e:
                 print(f"❌ Pydantic AI configuration failed: {e}")
                 # Fallback to direct genai for backward compatibility
                 try:
                     genai.configure(api_key=gemini_key)
                     print("✓ Fallback to direct Gemini API")
-                    return gemini_key, None
                 except Exception as fallback_error:
                     print(f"❌ Gemini fallback also failed: {fallback_error}")
-        return None, None
+        return None
 
 
 config = AppConfig()
@@ -121,30 +141,34 @@ async def generate_llm_response(query: str, context: str, results: list) -> Simp
     sources_used = len(results)
 
     try:
-        # Use Pydantic AI Agent for structured response
-        prompt = f"""Based on the following context from document search, provide a comprehensive answer to the user's question.
-
-Context from documents:
+        # Use Pydantic AI Agent for structured response with proper user message
+        user_message = f"""Context from documents:
 {context}
 
 User Question: {query}
 
-Instructions:
-- Answer directly and accurately based on the provided context
-- If the context doesn't fully answer the question, clearly state what information is available
-- Cite specific sources when making claims
-- Be concise but thorough
-- Provide a confidence score (0-1) based on how well the context answers the question
+Sources used: {sources_used}"""
 
-Please respond with:
-- answer: Your comprehensive response
-- confidence: Float between 0-1 indicating confidence in the answer
-- word_count: Number of words in your answer
-- sources_used: {sources_used}
-- metadata: Any additional relevant information"""
+        response = await config.agent.run(user_message)
 
-        response = await config.agent.run(prompt)
-        return response
+        # Ensure we always return SimpleRAGResponse type
+        if isinstance(response, SimpleRAGResponse):
+            # Update sources_used if not set correctly by the model
+            if response.sources_used != sources_used:
+                response.sources_used = sources_used
+            return response
+        else:
+            # If the agent didn't return the expected type, create a proper response
+            answer_text = str(response) if hasattr(
+                response, '__str__') else "Response type error"
+            return SimpleRAGResponse(
+                answer=answer_text,
+                confidence=0.5,
+                word_count=len(answer_text.split()),
+                sources_used=sources_used,
+                metadata={"note": "Response type converted",
+                          "method": "pydantic_ai_converted"}
+            )
 
     except Exception as llm_error:
         print(f"Pydantic AI Agent failed: {llm_error}")
@@ -153,14 +177,14 @@ Please respond with:
         for i, result in enumerate(results[:3]):
             fallback_answer += f"{i+1}. {result['text'][:300]}...\n\n"
 
-    return SimpleRAGResponse(
-        answer=fallback_answer,
-        confidence=0.3,  # Low confidence due to fallback
-        word_count=len(fallback_answer.split()),
-        sources_used=sources_used,
-        metadata={"fallback_reason": str(
-            llm_error), "method": "pydantic_ai_fallback"}
-    )
+        return SimpleRAGResponse(
+            answer=fallback_answer,
+            confidence=0.3,  # Low confidence due to fallback
+            word_count=len(fallback_answer.split()),
+            sources_used=sources_used,
+            metadata={"fallback_reason": str(
+                llm_error), "method": "pydantic_ai_fallback"}
+        )
 
 
 async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
@@ -209,8 +233,6 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
         sources=[
             RAGSource(
                 chunk_id=r['chunk_id'],
-                text=r['text'][:300] +
-                "..." if len(r['text']) > 300 else r['text'],
                 similarity=round(r['similarity'], 3),
                 document_id=r['document_id'],
                 metadata=r.get('metadata', {})
@@ -409,8 +431,6 @@ async def health_check():
             db_status_upper=db_status.upper(),
             embedding_model=pipeline.embedding_generator.model_name,
             table_name=pipeline.vector_store.table_name,
-            llm_status_color='#28a745' if config.gemini_key else '#ffc107',
-            llm_status_text='READY' if config.gemini_key else 'NOT CONFIGURED',
             total_documents=f"{stats['total_documents']:,}",
             total_chunks=f"{stats['total_chunks']:,}",
             embedding_dim=pipeline.embedding_generator.embedding_dim,

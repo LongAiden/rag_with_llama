@@ -697,8 +697,7 @@ HEALTH_CHECK_HTML = """
         <div class="component-card">
             <div class="component-status">🤖</div>
             <div class="component-name">LLM Service</div>
-            <div class="component-detail">Gemini 2.0 Flash</div>
-            <div class="component-detail" style="color: {llm_status_color}; font-weight: bold;">{llm_status_text}</div>
+            <div class="component-detail">Gemini 2.5 Flash</div>
         </div>
     </div>
 
