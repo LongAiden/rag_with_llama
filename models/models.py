@@ -53,6 +53,8 @@ class RAGSource(BaseModel):
     similarity: float = Field(
         ge=0, le=1, description="Similarity score to query")
     document_id: str = Field(description="Document this chunk comes from")
+    page_number: Optional[int] = Field(
+        None, description="Page number where this chunk appears")
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Additional source metadata")
 

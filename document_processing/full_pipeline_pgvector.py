@@ -79,12 +79,12 @@ class AppConfig:
                     Instructions:
                     - Answer directly and accurately based on the provided context
                     - If the context doesn't fully answer the question, clearly state what information is available
-                    - Cite specific sources when making claims
+                    - Cite specific sources when making claims, including page numbers when available (e.g., "according to Source 1, Page 5")
                     - Be concise but thorough
                     - Provide a confidence score (0-1) based on how well the context answers the question
 
                     Respond with:
-                    - answer: Your comprehensive response
+                    - answer: Your comprehensive response with page references
                     - confidence: Float between 0-1 indicating confidence in the answer
                     - word_count: Number of words in your answer
                     - sources_used: Number of sources used (will be provided)
@@ -215,9 +215,13 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
             table_used=table_name
         )
 
-    # Step 2: Build context from retrieved chunks
-    context_parts = [
-        f"[Source {i+1}]: {result['text']}" for i, result in enumerate(results)]
+    # Step 2: Build context from retrieved chunks with page numbers
+    context_parts = []
+    for i, result in enumerate(results):
+        page_info = ""
+        if result.get('metadata') and result['metadata'].get('page_number'):
+            page_info = f" (Page {result['metadata']['page_number']})"
+        context_parts.append(f"[Source {i+1}{page_info}]: {result['text']}")
     context = "\n\n".join(context_parts)
 
     # Step 3: Generate response with LLM
@@ -235,6 +239,7 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
                 chunk_id=r['chunk_id'],
                 similarity=round(r['similarity'], 3),
                 document_id=r['document_id'],
+                page_number=r.get('metadata', {}).get('page_number'),
                 metadata=r.get('metadata', {})
             ) for r in results
         ],
@@ -363,7 +368,7 @@ async def query_documents_form(
         sources_html = ''.join([f"""
         <div class="source-item">
             <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%})<br>
-            <em>Document: {source.document_id[:8]}... | Page: {source.metadata.get('page_number', 'N/A')}</em><br><br>
+            <em>Document: {source.document_id[:8]}... | Page: {source.page_number or 'N/A'}</em><br><br>
             {source.text}
         </div>
         """ for i, source in enumerate(result.sources)])
