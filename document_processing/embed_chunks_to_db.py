@@ -313,54 +313,93 @@ class ChunkEmbeddingPipeline:
         self.embedding_generator = EmbeddingGenerator(embedding_model)
         self.vector_store = VectorStore(db_params, table_name)
 
-    def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract text from PDF file."""
+    def extract_text_from_pdf(self, pdf_path: str) -> tuple:
+        """Extract text from PDF file with page tracking."""
         text = ""
+        page_mapping = []
+
         with open(pdf_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
             for page_num in range(len(pdf_reader.pages)):
                 page = pdf_reader.pages[page_num]
-                text += page.extract_text() + "\n"
-        return text
+                page_text = page.extract_text()
 
-    def extract_text_from_docx(self, docx_path: str) -> str:
-        """Extract text from DOCX file."""
+                start_pos = len(text)
+                text += page_text + "\n"
+                end_pos = len(text) - 1
+
+                if page_text.strip():
+                    page_mapping.append((start_pos, end_pos, page_num + 1))
+
+        return text, page_mapping
+
+    def extract_text_from_docx(self, docx_path: str) -> tuple:
+        """Extract text from DOCX file with page estimation."""
         try:
             from docx import Document
 
             doc = Document(docx_path)
-            text_parts = []
+            text = ""
+            page_mapping = []
+            chars_per_page = 2500  # Rough estimate for page breaks
 
             # Extract from paragraphs
             for paragraph in doc.paragraphs:
-                if paragraph.text.strip():  # Skip empty paragraphs
-                    text_parts.append(paragraph.text)
+                if paragraph.text.strip():
+                    start_pos = len(text)
+                    paragraph_text = paragraph.text + "\n\n"
+                    text += paragraph_text
+                    end_pos = len(text) - 1
+
+                    estimated_page = max(1, (start_pos // chars_per_page) + 1)
+                    page_mapping.append((start_pos, end_pos, estimated_page))
 
             # Extract from tables
             for table in doc.tables:
-                table_text = []
+                start_pos = len(text)
+                table_text = ""
                 for row in table.rows:
                     row_text = [cell.text.strip() for cell in row.cells]
-                    table_text.append(" | ".join(row_text))
-                text_parts.append("\n".join(table_text))
+                    table_text += " | ".join(row_text) + "\n"
+                table_text += "\n"
+                text += table_text
+                end_pos = len(text) - 1
 
-            return "\n\n".join(text_parts)
+                if table_text.strip():
+                    estimated_page = max(1, (start_pos // chars_per_page) + 1)
+                    page_mapping.append((start_pos, end_pos, estimated_page))
+
+            return text, page_mapping
 
         except Exception as e:
             print(f"Error extracting text from DOCX: {e}")
             raise ValueError(f"Failed to extract text from DOCX file: {e}")
 
-    def chunk_text(self, text: str, chunk_size: int = 512,
+    def get_page_number_for_position(self, position: int, page_mapping: List[tuple]) -> int:
+        """Get page number for a given text position."""
+        for start_pos, end_pos, page_num in page_mapping:
+            if start_pos <= position <= end_pos:
+                return page_num
+        # If not found, estimate based on closest page
+        if page_mapping:
+            for start_pos, end_pos, page_num in page_mapping:
+                if position < start_pos:
+                    return page_num
+            return page_mapping[-1][2]
+        return 1
+
+    def chunk_text(self, text: str, page_mapping: List[tuple], chunk_size: int = 512,
                    similarity_threshold: float = 0.5) -> List:
         """
-        Chunk text using Chonkie SemanticChunker.
+        Chunk text using Chonkie SemanticChunker with page tracking.
         Args:
             text: Input text to chunk
+            page_mapping: List of (start_pos, end_pos, page_num) tuples
             chunk_size: Maximum tokens per chunk
             similarity_threshold: Similarity threshold for semantic chunking
 
         Returns:
-            List of chunks
+            List of chunks with page number metadata
         """
         # Use model name string instead of SentenceTransformer object
         chunker = SemanticChunker(
@@ -368,7 +407,16 @@ class ChunkEmbeddingPipeline:
             similarity_threshold=similarity_threshold,
             embedding_model=self.embedding_generator.model_name
         )
-        return chunker.chunk(text)
+        chunks = chunker.chunk(text)
+
+        # Add page number to each chunk
+        for chunk in chunks:
+            if hasattr(chunk, 'start_index') and page_mapping:
+                chunk.page_number = self.get_page_number_for_position(chunk.start_index, page_mapping)
+            else:
+                chunk.page_number = 1
+
+        return chunks
 
     async def process_document(self, file_path: str, chunk_size: int = 512,
                          similarity_threshold: float = 0.5,
@@ -398,20 +446,23 @@ class ChunkEmbeddingPipeline:
         print(f"Processing document: {filename} (ID: {document_id})")
 
         # Extract text based on file type
+        page_mapping = None
         if file_type == 'pdf':
-            text = self.extract_text_from_pdf(str(file_path))
+            text, page_mapping = self.extract_text_from_pdf(str(file_path))
         elif file_type == 'docx':
-            text = self.extract_text_from_docx(str(file_path))
+            text, page_mapping = self.extract_text_from_docx(str(file_path))
         elif file_type in ['txt']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 text = f.read()
+            # For TXT files, create simple page mapping
+            page_mapping = [(0, len(text) - 1, 1)] if text else []
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
 
         print(f"Extracted {len(text)} characters from {filename}")
 
-        # Chunk the text
-        chunks = self.chunk_text(text, chunk_size, similarity_threshold)
+        # Chunk the text with page tracking
+        chunks = self.chunk_text(text, page_mapping, chunk_size, similarity_threshold)
         print(f"Created {len(chunks)} chunks")
 
         # Prepare chunks for embedding
@@ -429,6 +480,7 @@ class ChunkEmbeddingPipeline:
                 'token_count': chunk.token_count,
                 'start_index': getattr(chunk, 'start_index', None),
                 'end_index': getattr(chunk, 'end_index', None),
+                'page_number': getattr(chunk, 'page_number', 1),
                 'chunk_size': chunk_size,
                 'similarity_threshold': similarity_threshold,
                 'embedding_model': self.embedding_generator.model_name,

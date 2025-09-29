@@ -363,7 +363,7 @@ async def query_documents_form(
         sources_html = ''.join([f"""
         <div class="source-item">
             <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%})<br>
-            <em>Document: {source.document_id[:8]}...</em><br><br>
+            <em>Document: {source.document_id[:8]}... | Page: {source.metadata.get('page_number', 'N/A')}</em><br><br>
             {source.text}
         </div>
         """ for i, source in enumerate(result.sources)])
