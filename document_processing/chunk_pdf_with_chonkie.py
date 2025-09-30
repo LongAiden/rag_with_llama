@@ -108,33 +108,6 @@ def chunk_with_semantic_chunker(text, chunk_size=512, similarity_threshold=0.5, 
     return chunks
 
 
-def save_chunks_to_file(chunks, output_path, chunker_type):
-    """
-    Save chunks to a text file with page numbers.
-
-    Args:
-        chunks (list): List of chunks
-        output_path (str): Output file path
-        chunker_type (str): Type of chunker used
-    """
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(f"Chunks created using {chunker_type}\n")
-        f.write("=" * 50 + "\n\n")
-
-        for i, chunk in enumerate(chunks, 1):
-            f.write(f"Chunk {i}:\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"{chunk.text}\n\n")
-            f.write(f"Tokens: {chunk.token_count}\n")
-            if hasattr(chunk, 'page_number'):
-                f.write(f"Page Number: {chunk.page_number}\n")
-            if hasattr(chunk, 'start_index'):
-                f.write(f"Start Index: {chunk.start_index}\n")
-            if hasattr(chunk, 'end_index'):
-                f.write(f"End Index: {chunk.end_index}\n")
-            f.write("\n" + "="*50 + "\n\n")
-
-
 def get_page_number_for_position(position, page_mapping):
     """
     Get page number for a given text position.

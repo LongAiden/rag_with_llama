@@ -200,3 +200,33 @@ uvicorn full_pipeline_pgvector:app --port 8001
 ```bash
 pip install --upgrade -r requirements.txt
 ```
+
+## ⚠️ Known Issues
+
+### Pydantic AI + Google Gemini `additionalProperties` Warning
+
+**Warning Message:**
+```
+UserWarning: `additionalProperties` is not supported by Gemini; it will be removed from the tool JSON schema.
+```
+
+**What it means:**
+- Google's Gemini API doesn't support `additionalProperties` in JSON schemas
+- This affects Pydantic models with `dict[str, Any]` or `Dict[str, Any]` fields (like the `metadata` field in `SimpleRAGResponse`)
+- Pydantic AI automatically removes these properties and warns you
+
+**Impact on your application:**
+- ✅ **Functionality works** - No breaking issues
+- ⚠️ **Metadata fields will be empty** when returned from Gemini LLM
+- 📝 **Fallback responses still populate metadata** in error scenarios
+
+**Related Models Affected:**
+- `SimpleRAGResponse.metadata` field (used for LLM responses)
+- Any custom Pydantic models with `dict` type fields
+
+**Status:**
+- This is a known limitation of Google's Gemini API
+- Pydantic AI team has implemented automatic schema transformation
+- Safe to ignore for PoC projects, but consider specific fields instead of generic dicts for production
+
+**More Info:** [Pydantic AI Issue #1469](https://github.com/pydantic/pydantic-ai/issues/1469)
