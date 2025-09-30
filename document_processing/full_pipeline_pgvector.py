@@ -38,14 +38,11 @@ sys.path.insert(0, str(project_root))
 from models.models import QueryRequest, UploadResponse, RAGResponse, SimpleRAGResponse, RAGSource, RAGResponseMetadata
 
 # Constants
-DEFAULT_TABLE_NAME = "document_chunks"  # Changeable in webUI
+DEFAULT_TABLE_NAME = "document_chunks"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-DEFAULT_CHUNKING_SIMILARITY = 0.5  # Default similarity threshold for chunking
-CHUNK_SIZE_LIMITS = (128, 2048)
-SIMILARITY_THRESHOLD_LIMITS = (0.1, 0.9)
+DEFAULT_CHUNKING_SIMILARITY = 0.5
 ALLOWED_CONTENT_TYPES = [
     'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']
-ALLOWED_TABLES = ["document_chunks", 'bert', "test1", "test2"]
 
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
 
@@ -135,10 +132,10 @@ async def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
 
 def validate_upload_params(chunk_size: int, content_type: str):
     """Validate upload parameters"""
-    if not (CHUNK_SIZE_LIMITS[0] <= chunk_size <= CHUNK_SIZE_LIMITS[1]):
+    if not (128 <= chunk_size <= 2048):
         raise HTTPException(
             status_code=400,
-            detail=f"Chunk size must be between {CHUNK_SIZE_LIMITS[0]}-{CHUNK_SIZE_LIMITS[1]}"
+            detail=f"Chunk size must be between 128-2048"
         )
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -384,8 +381,8 @@ async def upload_and_process(
             status="success",
             document_id=processed_id,
             filename=file.filename,
-            message=f"Document validated and processed successfully with pgvector storage",
-            chunks_created=None  # Could query this if needed
+            message=f"Document processed successfully",
+            chunks_created=None
         )
 
     except HTTPException:
@@ -536,11 +533,6 @@ async def get_supported_types():
 @app.delete("/table/{table_name}")
 async def delete_table(table_name: str):
     """Delete a specific table from the database (optimized for speed)"""
-    if table_name not in ALLOWED_TABLES:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Deletion of table '{table_name}' not allowed. Allowed tables: {ALLOWED_TABLES}"
-        )
 
     try:
         pipeline_instance = await get_pipeline(table_name)
@@ -587,11 +579,9 @@ async def delete_table(table_name: str):
 
         return {
             "status": "success",
-            "message": f"Table '{table_name}' deleted successfully using fast TRUNCATE+DROP method",
+            "message": f"Table '{table_name}' deleted successfully",
             "table_name": table_name,
             "estimated_rows_deleted": row_count,
-            "optimization": "Used TRUNCATE CASCADE + DROP CASCADE for ultra-fast deletion",
-            "note": "Row count is estimated for performance",
             "timestamp": str(uuid.uuid1().time)
         }
 
