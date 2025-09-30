@@ -534,64 +534,94 @@ async def get_supported_types():
 async def delete_table(table_name: str):
     """Delete a specific table from the database (optimized for speed)"""
 
-    try:
-        pipeline_instance = await get_pipeline(table_name)
+    with logfire.span("table_deletion",
+                     table_name=table_name):
 
-        # Get connection and delete table quickly
-        conn = await pipeline_instance.vector_store._get_connection()
-        row_count = 0
+        logfire.info("Starting table deletion",
+                    table_name=table_name)
 
-        # Check if table exists and get approximate row count in one query
-        result = await conn.fetchrow("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_name = $1
-            ) as table_exists,
-            COALESCE((
-                SELECT reltuples::bigint
-                FROM pg_catalog.pg_class
-                WHERE relname = $1
-            ), 0) as estimated_rows;
-        """, table_name)
+        try:
+            pipeline_instance = await get_pipeline(table_name)
 
-        table_exists = result['table_exists']
-        row_count = result['estimated_rows']  # Approximate count (much faster)
+            # Get connection and delete table quickly
+            conn = await pipeline_instance.vector_store._get_connection()
+            row_count = 0
 
-        if not table_exists:
+            with logfire.span("table_existence_check"):
+                # Check if table exists and get approximate row count in one query
+                result = await conn.fetchrow("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = $1
+                    ) as table_exists,
+                    COALESCE((
+                        SELECT reltuples::bigint
+                        FROM pg_catalog.pg_class
+                        WHERE relname = $1
+                    ), 0) as estimated_rows;
+                """, table_name)
+
+                table_exists = result['table_exists']
+                row_count = result['estimated_rows']  # Approximate count (much faster)
+
+                logfire.info("Table existence check completed",
+                            table_exists=table_exists,
+                            estimated_rows=row_count)
+
+            if not table_exists:
+                await conn.close()
+                logfire.warn("Table deletion failed - table does not exist",
+                            table_name=table_name)
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Table '{table_name}' does not exist"
+                )
+
+            with logfire.span("table_data_deletion"):
+                # Two-step ultra-fast deletion: TRUNCATE then DROP
+                # Step 1: Instant data removal (no WAL overhead)
+                await conn.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
+                logfire.info("Table data truncated successfully",
+                            table_name=table_name,
+                            rows_deleted=row_count)
+
+            with logfire.span("table_schema_deletion"):
+                # Step 2: Clean schema removal
+                await conn.execute(f"DROP TABLE {table_name} CASCADE;")
+                logfire.info("Table schema dropped successfully",
+                            table_name=table_name)
+
             await conn.close()
+
+            # Reset pipeline if we deleted the current table
+            if table_name == pipeline_instance.vector_store.table_name:
+                config.pipeline = None
+                logfire.info("Pipeline reset due to current table deletion",
+                            table_name=table_name)
+
+            logfire.info("Table deletion completed successfully",
+                        table_name=table_name,
+                        estimated_rows_deleted=row_count)
+
+            return {
+                "status": "success",
+                "message": f"Table '{table_name}' deleted successfully",
+                "table_name": table_name,
+                "estimated_rows_deleted": row_count,
+                "timestamp": str(uuid.uuid1().time)
+            }
+
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions
+        except Exception as e:
+            logfire.error("Table deletion failed with unexpected error",
+                         table_name=table_name,
+                         error=str(e),
+                         error_type=type(e).__name__)
             raise HTTPException(
-                status_code=404,
-                detail=f"Table '{table_name}' does not exist"
+                status_code=500,
+                detail=f"Failed to delete table '{table_name}': {str(e)}"
             )
-
-        # Two-step ultra-fast deletion: TRUNCATE then DROP
-        # Step 1: Instant data removal (no WAL overhead)
-        await conn.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
-
-        # Step 2: Clean schema removal
-        await conn.execute(f"DROP TABLE {table_name} CASCADE;")
-
-        await conn.close()
-
-        # Reset pipeline if we deleted the current table
-        if table_name == pipeline_instance.vector_store.table_name:
-            config.pipeline = None
-
-        return {
-            "status": "success",
-            "message": f"Table '{table_name}' deleted successfully",
-            "table_name": table_name,
-            "estimated_rows_deleted": row_count,
-            "timestamp": str(uuid.uuid1().time)
-        }
-
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete table '{table_name}': {str(e)}"
-        )
 
 
 if __name__ == "__main__":
