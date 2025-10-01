@@ -145,6 +145,13 @@ curl -X POST "http://localhost:8000/query" \
   -d '{"query": "machine learning", "limit": 5}'
 ```
 
+### 4. Logfire Usage:
+- Use Logfire to log steps from end to end
+    <img src="./images/logfire_example.png" alt="Logfire" width="600">
+
+- Add Step for logging ReRank if the number of references >= 5
+    <img src="./images/rerank_logfire.png" alt="Logfire Rerank" width="600">
+
 ## ⚙️ Configuration
 
 ### Environment Variables
