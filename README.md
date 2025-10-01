@@ -115,10 +115,15 @@ Access FastAPI Swagger UI: `http://127.0.0.1:8000/docs`
 
 2. **Search Documents**: Enter queries, adjust similarity thresholds
     <img src="./images/query.png" alt="Query Interface" width="600">
-    <img src="./images/search_results.png" alt="Search Results" width="600">
-    <img src="./images/metadata.png" alt="Document Metadata" width="400">
 
-3. **Monitor System**: View stats and health status
+3. **Search Results**: Show answers and relevant sources + score with rerank
+    <img src="./images/nltk_question.png" alt="Search Results" width="600">
+
+    <img src="./images/rerank_result.png" alt="Sources" width="600"> 
+
+    <img src="./images/metadata_rerank.png" alt="Document Metadata" width="400">
+
+4. **Monitor System**: View stats and health status
 
     <img src="./images/health_status.png" alt="Health Status" width="600">
     <img src="./images/database.png" alt="Database Statistics" width="600">
@@ -140,12 +145,6 @@ curl -X POST "http://localhost:8000/query" \
   -d '{"query": "machine learning", "limit": 5}'
 ```
 
-### 4. Standalone Chunking
-```bash
-cd document_processing
-python chunk_pdf_with_chonkie.py
-```
-
 ## ⚙️ Configuration
 
 ### Environment Variables
@@ -162,19 +161,24 @@ python chunk_pdf_with_chonkie.py
 
 - **Semantic Chunking**: Intelligent text splitting with Chonkie
 - **Vector Search**: High-performance pgvector similarity search
+- **Hybrid Retrieval**: Combines vector embeddings with BM25 keyword matching for superior accuracy
+- **Reranking Pipeline**: Advanced relevance scoring to surface the most pertinent results
 - **File Validation**: Security checks and size limits
 - **Multi-table Support**: Organize documents by categories
 - **LLM Integration**: Smart responses with Gemini
 - **Web Interface**: Modern, responsive UI
 - **API Access**: RESTful endpoints for automation
+- **Logfire Intergration**: Uisng Logfire for logging and monitoring
 
 ## 🛠️ Development Status
 
 ✅ **Completed**:
 - Chunking and embedding pipeline
 - Vector storage with PostgreSQL
+- Using BM25 to rerank retrieve documents
 - Gemini integration for retrieval
 - FastAPI web interface
+- Logfire setup
 - Organized modular structure
 
 📋 **Todo**:
