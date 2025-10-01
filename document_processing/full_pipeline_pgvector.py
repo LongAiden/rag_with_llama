@@ -490,8 +490,7 @@ async def query_documents(request: QueryRequest):
             limit=request.limit,
             threshold=request.threshold,
             document_ids=request.document_ids,
-            table_name=DEFAULT_TABLE_NAME,
-            rerank_top_k=request.rerank_top_k
+            table_name=DEFAULT_TABLE_NAME
         )
         # Return the structured RAGResponse directly
         return result
@@ -513,8 +512,7 @@ async def query_documents_form(
             limit=limit,
             threshold=threshold,
             document_ids=None,
-            table_name=table_name,
-            rerank_top_k=None  # Use limit as default
+            table_name=table_name
         )
 
         # Build sources HTML with optional BM25 rerank scores
