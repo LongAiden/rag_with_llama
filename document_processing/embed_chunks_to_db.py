@@ -403,7 +403,7 @@ class ChunkEmbeddingPipeline:
             f"Successfully processed {filename} -> Document ID: {document_id}")
         return document_id
 
-    async def search_documents(self, query: str, limit: int = 5, threshold: float = 0.7,
+    async def search_documents(self, query: str, limit: int = 5, threshold: float = 0.5,
                                document_ids: Optional[List[str]] = None) -> List[Dict]:
         """
         Search for relevant document chunks using pgvector.

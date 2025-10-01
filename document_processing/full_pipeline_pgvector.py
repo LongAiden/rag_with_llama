@@ -491,7 +491,6 @@ async def query_documents(request: QueryRequest):
             threshold=request.threshold,
             document_ids=request.document_ids,
             table_name=DEFAULT_TABLE_NAME,
-            enable_reranking=request.enable_reranking,
             rerank_top_k=request.rerank_top_k
         )
         # Return the structured RAGResponse directly
@@ -505,8 +504,7 @@ async def query_documents_form(
     query: str = Form(...),
     limit: int = Form(5),
     threshold: float = Form(0.7),
-    table_name: str = Form(DEFAULT_TABLE_NAME),
-    enable_reranking: bool = Form(False)
+    table_name: str = Form(DEFAULT_TABLE_NAME)
 ):
     """Query documents using form data (for HTML form submission) with optional reranking"""
     try:
@@ -516,7 +514,6 @@ async def query_documents_form(
             threshold=threshold,
             document_ids=None,
             table_name=table_name,
-            enable_reranking=enable_reranking,
             rerank_top_k=None  # Use limit as default
         )
 
