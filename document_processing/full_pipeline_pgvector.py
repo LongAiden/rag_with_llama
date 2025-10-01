@@ -1,18 +1,22 @@
 import os
 import sys
 import uuid
+import numpy as np
 from pathlib import Path
+from typing import List, Dict
 
 # Disable tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import logfire
+from rank_bm25 import BM25Okapi
 import google.generativeai as genai
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from file_validator import FileValidator, FileValidationConfig
 from embed_chunks_to_db import ChunkEmbeddingPipeline
+from reranker import Reranker
 from templates import (
     HOME_PAGE_HTML,
     SEARCH_RESULTS_HTML,
@@ -70,6 +74,7 @@ class AppConfig:
         self.file_validator = FileValidator(FileValidationConfig())
         self.agent = self._configure_pydantic_ai()
         self.pipeline = None
+        self.reranker = None  # Lazy initialization to avoid startup overhead
 
     def _configure_pydantic_ai(self):
         gemini_key = os.getenv('GOOGLE_API_KEY')
@@ -117,6 +122,44 @@ class AppConfig:
 
 config = AppConfig()
 
+def rerank_bm25(query:str,
+                sources: List[Dict], 
+                top_k:int):
+    """
+    Using bm25 to return top k sources from the inputs
+    Args:
+        sources: 
+            - List of sources from postgresql
+            - Format: {'chunk_id': '6250bf1e-e76e-4bb9-b33b-d05eb07aa77c',
+                        'text': 'abc'
+                        'metadata': {},
+                        ...}
+        top_k: top result
+    """
+    # Tokenize the text (simple word splitting)
+    tokenized_corpus = [doc['text'].lower().split() for doc in sources]
+
+    # Step 2: Create BM25 index
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    # Step 3: Search with BM25
+    tokenized_query = query.lower().split()
+
+    # Get BM25 scores for all documents
+    bm25_scores = bm25.get_scores(tokenized_query)
+
+    # Get top k results
+    top_indices = np.argsort(bm25_scores)[::-1][:top_k]
+
+    # Retrieve top documents
+    bm25_results = []
+    for idx in top_indices:
+        result = sources[idx].copy()
+        result['bm25_score'] = float(bm25_scores[idx])
+        bm25_results.append(result)
+
+    return bm25_results
+
 
 async def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
     if config.pipeline is None or config.pipeline.vector_store.table_name != table_name:
@@ -128,6 +171,16 @@ async def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
         # Initialize the database for the new pipeline
         await config.pipeline.vector_store._initialize_database()
     return config.pipeline
+
+
+def get_reranker():
+    """Get or initialize the reranker (lazy initialization)."""
+    if config.reranker is None:
+        # Get model from environment or use default
+        rerank_model = os.getenv('RERANK_MODEL', 'cross-encoder/ms-marco-MiniLM-L-6-v2')
+        config.reranker = Reranker(model_name=rerank_model)
+        print(f"✓ Reranker initialized with model: {rerank_model}")
+    return config.reranker
 
 
 def validate_upload_params(chunk_size: int, content_type: str):
@@ -223,8 +276,9 @@ Sources used: {sources_used}"""
             )
 
 
-async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None, table_name=DEFAULT_TABLE_NAME):
-    """Common document search logic"""
+async def perform_document_search(query: str, limit: int, threshold: float, document_ids=None,
+                                 table_name=DEFAULT_TABLE_NAME):
+    """Common document search logic with optional reranking"""
     pipeline = await get_pipeline(table_name)
 
     with logfire.span("document_search",
@@ -246,9 +300,34 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
                 document_ids=document_ids
             )
 
-            logfire.info("Search completed",
+            logfire.info("Initial search completed",
                         results_found=len(results),
                         avg_similarity=sum(r['similarity'] for r in results) / len(results) if results else 0)
+
+        # Step 1.5: Apply BM25 reranking if we have enough results
+        avg_rerank_score = None
+
+        if len(results) > 5:
+            reranking_enabled = True
+            with logfire.span("bm25_reranking"):
+                # Rerank using BM25
+                reranked_results = rerank_bm25(query=query, sources=results, top_k=5)
+
+                # Add BM25 scores to results
+                results = [{
+                    'chunk_id': r['chunk_id'],
+                    'text': r['text'],
+                    'document_id': r['document_id'],
+                    'metadata': r['metadata'],
+                    'similarity': r['similarity'],
+                    'rerank_score': r['bm25_score']
+                } for r in reranked_results]
+
+                avg_rerank_score = sum(r['rerank_score'] for r in results) / len(results) if results else None
+
+                logfire.info("BM25 reranking completed",
+                           final_results=len(results),
+                           avg_rerank_score=avg_rerank_score)
 
         if not results:
             return RAGResponse(
@@ -258,10 +337,12 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
                 search_stats=RAGResponseMetadata(
                     chunks_found=0,
                     avg_similarity=0.0,
-                    search_method="pgvector_cosine",
+                    search_method="pgvector_cosine" + ("_bm25" if reranking_enabled else ""),
                     threshold_used=threshold,
                     word_count=9,  # word count of the no-results message
-                    confidence=0.0
+                    confidence=0.0,
+                    reranking_enabled=reranking_enabled,
+                    avg_rerank_score=avg_rerank_score
                 ),
                 table_used=table_name
             )
@@ -292,16 +373,19 @@ async def perform_document_search(query: str, limit: int, threshold: float, docu
                     similarity=round(r['similarity'], 3),
                     document_id=r['document_id'],
                     page_number=r.get('metadata', {}).get('page_number'),
-                    metadata=r.get('metadata', {})
+                    metadata=r.get('metadata', {}),
+                    rerank_score=round(r['rerank_score'], 3) if 'rerank_score' in r else None
                 ) for r in results
             ],
             search_stats=RAGResponseMetadata(
                 chunks_found=len(results),
                 avg_similarity=round(avg_similarity, 3),
-                search_method="pgvector_cosine",
+                search_method="pgvector_cosine" + ("_bm25" if reranking_enabled else ""),
                 threshold_used=threshold,
                 word_count=llm_response.word_count,
-                confidence=llm_response.confidence
+                confidence=llm_response.confidence,
+                reranking_enabled=reranking_enabled,
+                avg_rerank_score=round(avg_rerank_score, 3) if avg_rerank_score else None
             ),
             table_used=table_name
         )
@@ -399,14 +483,16 @@ async def upload_and_process(
 
 @app.post("/query", response_model=RAGResponse)
 async def query_documents(request: QueryRequest):
-    """Query documents using pgvector similarity search + LLM generation"""
+    """Query documents using pgvector similarity search + LLM generation with optional reranking"""
     try:
         result = await perform_document_search(
             query=request.query,
             limit=request.limit,
             threshold=request.threshold,
             document_ids=request.document_ids,
-            table_name=DEFAULT_TABLE_NAME
+            table_name=DEFAULT_TABLE_NAME,
+            enable_reranking=request.enable_reranking,
+            rerank_top_k=request.rerank_top_k
         )
         # Return the structured RAGResponse directly
         return result
@@ -419,22 +505,25 @@ async def query_documents_form(
     query: str = Form(...),
     limit: int = Form(5),
     threshold: float = Form(0.7),
-    table_name: str = Form(DEFAULT_TABLE_NAME)
+    table_name: str = Form(DEFAULT_TABLE_NAME),
+    enable_reranking: bool = Form(False)
 ):
-    """Query documents using form data (for HTML form submission)"""
+    """Query documents using form data (for HTML form submission) with optional reranking"""
     try:
         result = await perform_document_search(
             query=query,
             limit=limit,
             threshold=threshold,
             document_ids=None,
-            table_name=table_name
+            table_name=table_name,
+            enable_reranking=enable_reranking,
+            rerank_top_k=None  # Use limit as default
         )
 
-        # Build sources HTML
+        # Build sources HTML with optional BM25 rerank scores
         sources_html = ''.join([f"""
         <div class="source-item">
-            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%})<br>
+            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%}{"" if source.rerank_score is None else f", BM25: {source.rerank_score:.3f}"})<br>
             <em>Document: {source.document_id[:8]}... | Page: {source.page_number or 'N/A'}</em><br><br>
             {source.text}
         </div>

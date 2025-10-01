@@ -8,6 +8,8 @@ class QueryRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=20)
     threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     document_ids: Optional[List[str]] = None
+    enable_reranking: bool = Field(default=False, description="Enable cross-encoder reranking")
+    rerank_top_k: Optional[int] = Field(None, ge=1, le=20, description="Number of results to return after reranking")
 
 
 class UploadResponse(BaseModel):
@@ -58,6 +60,8 @@ class RAGSource(BaseModel):
         None, description="Page number where this chunk appears")
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Additional source metadata")
+    rerank_score: Optional[float] = Field(
+        None, description="Reranking score from cross-encoder model")
 
 
 class RAGResponseMetadata(BaseModel):
@@ -72,6 +76,10 @@ class RAGResponseMetadata(BaseModel):
         None, description="Number of words in response")
     confidence: Optional[float] = Field(
         None, ge=0, le=1, description="Response confidence score")
+    reranking_enabled: Optional[bool] = Field(
+        None, description="Whether reranking was applied")
+    avg_rerank_score: Optional[float] = Field(
+        None, description="Average reranking score")
 
 
 class RAGResponse(BaseModel):

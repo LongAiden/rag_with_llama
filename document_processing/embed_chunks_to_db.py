@@ -3,11 +3,7 @@ import os
 import json
 import uuid
 import asyncpg
-import numpy as np
-import PyPDF2
 from pathlib import Path
-from docx import Document
-import asyncio
 
 # Disable tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -17,13 +13,7 @@ from sentence_transformers import SentenceTransformer
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from chunk_pdf_with_chonkie import (
-    extract_text_from_pdf,
-    extract_text_from_docx,
-    get_page_number_for_position,
-    chunk_with_semantic_chunker,
-    process_document
-)
+from chunk_pdf_with_chonkie import process_document
 
 # Import your existing chunking functions
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))

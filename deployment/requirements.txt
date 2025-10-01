@@ -25,6 +25,9 @@ chonkie>=0.1.0
 # LLM Integration
 google-generativeai>=0.8.0
 
+# ReRank
+rank_bm25
+
 # Web Interface & API
 streamlit>=1.31.0
 fastapi>=0.104.0
