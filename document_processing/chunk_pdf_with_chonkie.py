@@ -5,47 +5,76 @@ from chonkie import SemanticChunker
 
 def extract_text_from_pdf(pdf_path):
     """
-    Extract text from PDF file using PyPDF2.
+    Extract text from PDF file using PyPDF2 with page tracking.
     Args:
         pdf_path (str): Path to the PDF file
     Returns:
-        str: Extracted text from all pages
+        tuple: (full_text, page_mapping) where page_mapping is list of (start_pos, end_pos, page_num)
     """
     text = ""
+    page_mapping = []
+
     with open(pdf_path, 'rb') as file:
         pdf_reader = PyPDF2.PdfReader(file)
 
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
-            text += page.extract_text() + "\n"
+            page_text = page.extract_text()
 
-    return text
+            start_pos = len(text)
+            text += page_text + "\n"
+            end_pos = len(text) - 1  # Exclude the newline
+
+            if page_text.strip():  # Only add mapping if page has content
+                page_mapping.append((start_pos, end_pos, page_num + 1))  # 1-indexed page numbers
+
+    return text, page_mapping
 
 
 def extract_text_from_docx(docx_path):
     """
-    Extract text from DOCX file using python-docx.
+    Extract text from DOCX file using python-docx with page estimation.
     Args:
         docx_path (str): Path to the DOCX file
     Returns:
-        str: Extracted text from all paragraphs and tables
+        tuple: (full_text, page_mapping) where page_mapping estimates pages based on content
     """
     try:
         doc = Document(docx_path)
         text = ""
+        page_mapping = []
+        current_page = 1
+        chars_per_page = 2500  # Rough estimate for page breaks
 
         # Extract text from paragraphs
         for paragraph in doc.paragraphs:
-            text += paragraph.text + "\n"
+            start_pos = len(text)
+            paragraph_text = paragraph.text + "\n"
+            text += paragraph_text
+            end_pos = len(text) - 1
+
+            if paragraph.text.strip():  # Only track non-empty paragraphs
+                # Estimate page number based on character position
+                estimated_page = max(1, (start_pos // chars_per_page) + 1)
+                page_mapping.append((start_pos, end_pos, estimated_page))
 
         # Extract text from tables
         for table in doc.tables:
+            start_pos = len(text)
+            table_text = ""
             for row in table.rows:
                 for cell in row.cells:
-                    text += cell.text + " "
-                text += "\n"
+                    table_text += cell.text + " "
+                table_text += "\n"
 
-        return text
+            text += table_text
+            end_pos = len(text) - 1
+
+            if table_text.strip():
+                estimated_page = max(1, (start_pos // chars_per_page) + 1)
+                page_mapping.append((start_pos, end_pos, estimated_page))
+
+        return text, page_mapping
     except Exception as e:
         print(f"Error extracting text from DOCX: {e}")
         raise ValueError(f"Failed to extract text from DOCX file: {e}")
@@ -79,41 +108,37 @@ def chunk_with_semantic_chunker(text, chunk_size=512, similarity_threshold=0.5, 
     return chunks
 
 
-def save_chunks_to_file(chunks, output_path, chunker_type):
+def get_page_number_for_position(position, page_mapping):
     """
-    Save chunks to a text file.
-
+    Get page number for a given text position.
     Args:
-        chunks (list): List of chunks
-        output_path (str): Output file path
-        chunker_type (str): Type of chunker used
+        position (int): Character position in text
+        page_mapping (list): List of (start_pos, end_pos, page_num) tuples
+    Returns:
+        int: Page number
     """
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(f"Chunks created using {chunker_type}\n")
-        f.write("=" * 50 + "\n\n")
-
-        for i, chunk in enumerate(chunks, 1):
-            f.write(f"Chunk {i}:\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"{chunk.text}\n\n")
-            f.write(f"Tokens: {chunk.token_count}\n")
-            if hasattr(chunk, 'start_index'):
-                f.write(f"Start Index: {chunk.start_index}\n")
-            if hasattr(chunk, 'end_index'):
-                f.write(f"End Index: {chunk.end_index}\n")
-            f.write("\n" + "="*50 + "\n\n")
-
+    for start_pos, end_pos, page_num in page_mapping:
+        if start_pos <= position <= end_pos:
+            return page_num
+    # If not found, estimate based on closest page
+    if page_mapping:
+        for start_pos, end_pos, page_num in page_mapping:
+            if position < start_pos:
+                return page_num
+        # If position is after all mapped content, return last page
+        return page_mapping[-1][2]
+    return 1  # Default to page 1
 
 def process_document(file_path, chunk_size=512, similarity_threshold=0.5, embedding_model=None):
     """
-    Process a document (PDF, DOCX, or TXT) and return chunks.
+    Process a document (PDF, DOCX, or TXT) and return chunks with page numbers.
     Args:
         file_path (str): Path to the document file
         chunk_size (int): Maximum tokens per chunk
         similarity_threshold (float): Similarity threshold for semantic chunking
         embedding_model: Custom embedding model
     Returns:
-        list: List of chunks
+        list: chunks with page number metadata attached
     """
     from pathlib import Path
 
@@ -123,44 +148,32 @@ def process_document(file_path, chunk_size=512, similarity_threshold=0.5, embedd
     print(f"Processing {file_type.upper()} file: {file_path.name}")
 
     # Extract text based on file type
+    page_mapping = None
     if file_type == 'pdf':
-        text = extract_text_from_pdf(str(file_path))
+        text, page_mapping = extract_text_from_pdf(str(file_path))
     elif file_type == 'docx':
-        text = extract_text_from_docx(str(file_path))
+        text, page_mapping = extract_text_from_docx(str(file_path))
     elif file_type == 'txt':
         with open(file_path, 'r', encoding='utf-8') as f:
             text = f.read()
+        # For TXT files, create a simple page mapping (assume one page)
+        page_mapping = [(0, len(text) - 1, 1)] if text else []
     else:
-        raise ValueError(f"Unsupported file type: {file_type}. Supported types: PDF, DOCX, TXT")
+        raise ValueError(
+            f"Unsupported file type: {file_type}. Supported types: PDF, DOCX, TXT")
 
     print(f"Extracted {len(text)} characters from {file_path.name}")
 
     # Chunk the text
-    chunks = chunk_with_semantic_chunker(text, chunk_size, similarity_threshold, embedding_model)
+    chunks = chunk_with_semantic_chunker(
+        text, chunk_size, similarity_threshold, embedding_model)
     print(f"Created {len(chunks)} chunks")
 
+    # Add page number metadata to chunks
+    for chunk in chunks:
+        if hasattr(chunk, 'start_index') and page_mapping:
+            chunk.page_number = get_page_number_for_position(chunk.start_index, page_mapping)
+        else:
+            chunk.page_number = 1  # Default to page 1 if no position info
+
     return chunks
-
-
-if __name__ == "__main__":
-    # Example usage - update the file path as needed
-    document_path = "../docs/llama2.pdf"  # Change this to your document path
-
-    try:
-        chunks = process_document(
-            document_path,
-            chunk_size=512,
-            similarity_threshold=0.5
-        )
-
-        # Save chunks to output file
-        from pathlib import Path
-        output_file = f"chunks_output_{Path(document_path).stem}.txt"
-        save_chunks_to_file(chunks, output_file, "SemanticChunker")
-
-        print(f"\nChunking completed!")
-        print(f"Total chunks: {len(chunks)}")
-        print(f"Output saved to: {output_file}")
-
-    except Exception as e:
-        print(f"Error processing document: {e}")
