@@ -1,6 +1,6 @@
 # Core ML Stack - Version Pinned for Stability
-numpy>=1.21.0,<2.0  # Critical: NumPy 2.x breaks binary compatibility
-scipy>=1.10.0,<1.12.0  # Must align with NumPy version
+numpy>=1.21.0,<2.0 
+scipy>=1.10.0,<1.12.0
 torch>=2.0.0,<2.5.0
 torchvision>=0.15.0,<0.20.0
 sentence-transformers>=2.2.0
@@ -10,6 +10,7 @@ psycopg2-binary>=2.9.0
 pgvector>=0.3.0
 sqlalchemy[asyncio]>=2.0.0
 greenlet>=2.0.0
+asyncpg # Replace pscycop2
 
 # Document Processing Pipeline
 pypdf>=3.17.0
@@ -24,11 +25,15 @@ chonkie>=0.1.0
 # LLM Integration
 google-generativeai>=0.8.0
 
+# ReRank
+rank_bm25
+
 # Web Interface & API
 streamlit>=1.31.0
 fastapi>=0.104.0
 pydantic>=2.5.0
 pydantic-ai>=0.0.7
+pydantic-ai-slim[google]
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 
@@ -37,5 +42,4 @@ python-dotenv>=1.0.0
 
 # Production Essentials (Add these)
 gunicorn>=21.2.0  # WSGI server for production
-prometheus-client>=0.19.0  # Metrics collection
-structlog>=23.2.0  # Structured logging
+logfire # For logging

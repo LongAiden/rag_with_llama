@@ -116,8 +116,8 @@ HOME_PAGE_HTML = """
             <br>
             <label>Table Name: <input type="text" name="table_name" value="document_chunks" placeholder="document_chunks"></label>
             <br>
-            <label>Max Results: <input type="number" name="limit" value="5" min="1" max="10" style="width: 80px;"></label>
-            <label>Similarity Threshold: <input type="number" name="threshold" value="0.7" min="0.5" max="0.95" step="0.05" style="width: 80px;"></label>
+            <label>Max Results: <input type="number" name="limit" value="5" min="1" max="100" style="width: 80px;"></label>
+            <label>Similarity Threshold: <input type="number" name="threshold" value="0.5" min="0.5" max="0.95" step="0.05" style="width: 80px;"></label>
             <br>
             <button type="submit">Search</button>
         </form>
@@ -301,7 +301,9 @@ SEARCH_RESULTS_HTML = """
         • Average similarity: {avg_similarity}<br>
         • Search method: {search_method}<br>
         • Table used: {table_used}<br>
-        • Threshold: {threshold_used}
+        • Threshold: {threshold_used}<br>
+        • Response confidence: {confidence}<br>
+        • Response word count: {word_count}
     </div>
 </body>
 </html>
@@ -695,8 +697,7 @@ HEALTH_CHECK_HTML = """
         <div class="component-card">
             <div class="component-status">🤖</div>
             <div class="component-name">LLM Service</div>
-            <div class="component-detail">Gemini 2.0 Flash</div>
-            <div class="component-detail" style="color: {llm_status_color}; font-weight: bold;">{llm_status_text}</div>
+            <div class="component-detail">Gemini 2.5 Flash</div>
         </div>
     </div>
 
