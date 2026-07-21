@@ -19,7 +19,7 @@ except ImportError:
         def decorator(fn): return fn
         return decorator
 
-from retrieval.utils import rerank_bm25
+from retrieval.utils import merge_with_rrf
 from retrieval.llm_operations import generate_llm_response
 from models.models import RAGResponse, RAGSource, RAGResponseMetadata
 from observability.llm_logger import InteractionPayload, log_interaction
@@ -35,6 +35,8 @@ async def perform_document_search(
     table_name: str = "document_chunks",
     model: str = "gemini-2.5-flash",
     session_id: Optional[str] = None,
+    enable_reranking: bool = True,
+    rerank_top_k: int = 5,
 ) -> RAGResponse:
     """
     Common document search logic with optional reranking.
@@ -64,60 +66,88 @@ async def perform_document_search(
                      threshold=threshold,
                      table_name=table_name):
 
-        # Step 1: pgvector similarity search
+        # Step 1: pgvector similarity search (semantic retrieval)
+        HYBRID_LIMIT = 20
         with logfire.span("embedding_generation_for_search"):
             logfire.info("Generating embeddings for search query",
                         query_length=len(query),
                         embedding_model=pipeline.embedding_generator.model_name)
 
-            results = await pipeline.search_documents(
+            vector_results = await pipeline.search_documents(
                 query=query,
-                limit=limit,
+                limit=HYBRID_LIMIT,
                 threshold=threshold,
                 document_ids=document_ids
             )
 
-            logfire.info("Initial search completed",
-                        results_found=len(results),
-                        avg_similarity=sum(r['similarity'] for r in results) / len(results) if results else 0)
+            logfire.info("Vector search completed",
+                        results_found=len(vector_results),
+                        avg_similarity=sum(r['similarity'] for r in vector_results) / len(vector_results) if vector_results else 0)
 
-        # Step 1.5: Apply BM25 reranking if we have enough results
+        # Step 2: BM25 search (lexical retrieval)
+        with logfire.span("bm25_retrieval"):
+            bm25_results = await pipeline.vector_store.search_bm25(
+                query=query,
+                limit=HYBRID_LIMIT,
+                document_ids=document_ids,
+            )
+            logfire.info("BM25 search completed", results_found=len(bm25_results))
+
+        # Step 3: RRF merge of vector + BM25 results
+        with logfire.span("rrf_merge"):
+            merged_results = merge_with_rrf(vector_results, bm25_results)
+            logfire.info("RRF merge completed", merged_count=len(merged_results))
+
+        # Step 4: Cross-encoder reranking (if enabled)
         avg_rerank_score = None
-        reranking_enabled = False
+        reranking_enabled = enable_reranking
 
-        if len(results) > 5:
-            reranking_enabled = True
-            with logfire.span("bm25_reranking"):
-                # Rerank using BM25
-                reranked_results = rerank_bm25(query=query, sources=results, top_k=5)
+        if enable_reranking and merged_results:
+            with logfire.span("cross_encoder_reranking"):
+                try:
+                    from retrieval.utils import get_reranker
+                    reranker = get_reranker(config)
+                    original_by_id = {r['chunk_id']: r for r in merged_results}
+                    reranked = reranker.rerank(
+                        query=query,
+                        results=merged_results,
+                        top_k=rerank_top_k,
+                    )
+                    merged_results = [{
+                        'chunk_id': r.chunk_id,
+                        'text': r.text,
+                        'document_id': r.document_id,
+                        'metadata': r.metadata,
+                        'similarity': r.similarity,
+                        'bm25_score': original_by_id[r.chunk_id].get('bm25_score', 0.0),
+                        'rrf_score': original_by_id[r.chunk_id].get('rrf_score', 0.0),
+                        'rerank_score': r.rerank_score,
+                    } for r in reranked]
+                    avg_rerank_score = sum(r['rerank_score'] for r in merged_results) / len(merged_results) if merged_results else None
+                    logfire.info("Cross-encoder reranking completed",
+                               final_results=len(merged_results),
+                               avg_rerank_score=avg_rerank_score)
+                except Exception as e:
+                    logfire.error("Cross-encoder reranking failed, using RRF scores only", error=str(e))
+                    reranking_enabled = False
+                    merged_results = merged_results[:rerank_top_k]
+        else:
+            merged_results = merged_results[:limit]
 
-                # Add BM25 scores to results
-                results = [{
-                    'chunk_id': r['chunk_id'],
-                    'text': r['text'],
-                    'document_id': r['document_id'],
-                    'metadata': r['metadata'],
-                    'similarity': r['similarity'],
-                    'rerank_score': r['bm25_score']
-                } for r in reranked_results]
-
-                avg_rerank_score = sum(r['rerank_score'] for r in results) / len(results) if results else None
-
-                logfire.info("BM25 reranking completed",
-                           final_results=len(results),
-                           avg_rerank_score=avg_rerank_score)
+        results = merged_results
 
         if not results:
+            no_results_msg = "No relevant documents found with the specified similarity threshold."
             return RAGResponse(
                 query=query,
-                answer="No relevant documents found with the specified similarity threshold.",
+                answer=no_results_msg,
                 sources=[],
                 search_stats=RAGResponseMetadata(
                     chunks_found=0,
                     avg_similarity=0.0,
-                    search_method="pgvector_cosine" + ("_bm25" if reranking_enabled else ""),
+                    search_method="hybrid_bm25_vector" + ("_crossencoder" if reranking_enabled else ""),
                     threshold_used=threshold,
-                    word_count=9,  # word count of the no-results message
+                    word_count=len(no_results_msg.split()),
                     confidence=0.0,
                     reranking_enabled=reranking_enabled,
                     avg_rerank_score=avg_rerank_score
@@ -215,7 +245,7 @@ async def perform_document_search(
                 latency_ms=latency_ms,
                 sources_used=len(results),
                 table_name=table_name,
-                rerank_method="bm25" if reranking_enabled else "none",
+                rerank_method="cross_encoder" if reranking_enabled else "rrf_only",
                 input_tokens=llm_response.input_tokens,
                 output_tokens=llm_response.output_tokens,
                 total_tokens=llm_response.total_tokens,
@@ -237,12 +267,14 @@ async def perform_document_search(
                     page_number=r.get('metadata', {}).get('page_number'),
                     metadata=r.get('metadata', {}),
                     rerank_score=round(r['rerank_score'], 3) if 'rerank_score' in r else None,
+                    bm25_score=round(r.get('bm25_score', 0.0), 3),
+                    rrf_score=round(r.get('rrf_score', 0.0), 3),
                 ) for r in results
             ],
             search_stats=RAGResponseMetadata(
                 chunks_found=len(results),
                 avg_similarity=round(avg_similarity, 3),
-                search_method="pgvector_cosine" + ("_bm25" if reranking_enabled else ""),
+                search_method="hybrid_bm25_vector" + ("_crossencoder" if reranking_enabled else ""),
                 threshold_used=threshold,
                 word_count=llm_response.word_count,
                 confidence=llm_response.confidence,

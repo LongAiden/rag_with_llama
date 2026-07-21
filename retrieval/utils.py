@@ -54,6 +54,48 @@ def rerank_bm25(query: str, sources: List[Dict], top_k: int) -> List[Dict]:
     return bm25_results
 
 
+def merge_with_rrf(
+    vector_results: List[Dict],
+    bm25_results: List[Dict],
+    k: int = 60,
+) -> List[Dict]:
+    """
+    Merge two ranked result lists using Reciprocal Rank Fusion (RRF).
+
+    Args:
+        vector_results: Results from pgvector (sorted by similarity desc)
+        bm25_results: Results from BM25 (sorted by bm25_score desc)
+        k: RRF constant (default 60)
+
+    Returns:
+        Merged list sorted by rrf_score descending, deduplicated by chunk_id
+    """
+    vector_ranks = {r['chunk_id']: i + 1 for i, r in enumerate(vector_results)}
+    bm25_ranks = {r['chunk_id']: i + 1 for i, r in enumerate(bm25_results)}
+
+    all_chunk_ids = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+
+    lookup = {r['chunk_id']: r for r in vector_results}
+    for r in bm25_results:
+        if r['chunk_id'] not in lookup:
+            lookup[r['chunk_id']] = r
+
+    merged = []
+    for cid in all_chunk_ids:
+        base = lookup[cid].copy()
+        vec_rank = vector_ranks.get(cid, float('inf'))
+        bm25_rank = bm25_ranks.get(cid, float('inf'))
+        rrf_score = (1.0 / (k + vec_rank)) + (1.0 / (k + bm25_rank))
+
+        base['rrf_score'] = rrf_score
+        base['bm25_score'] = base.get('bm25_score', 0.0)
+        base.setdefault('similarity', 0.0)
+        merged.append(base)
+
+    merged.sort(key=lambda x: x['rrf_score'], reverse=True)
+    return merged
+
+
 def get_reranker(config) -> Reranker:
     """
     Get or initialize the reranker (lazy initialization).

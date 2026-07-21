@@ -226,6 +226,8 @@ async def _execute_traced_search(
     document_ids: Optional[List[str]],
     config,
     get_pipeline,
+    enable_reranking: bool = True,
+    rerank_top_k: int = 5,
 ) -> RAGResponse:
     """Shared search logic used by both JSON and form endpoints.
     
@@ -243,6 +245,8 @@ async def _execute_traced_search(
         table_name=table_name,
         model=model,
         session_id=session_id,
+        enable_reranking=enable_reranking,
+        rerank_top_k=rerank_top_k,
     )
 
 
@@ -275,6 +279,8 @@ async def query_documents(
                 document_ids=request.document_ids,
                 config=config,
                 get_pipeline=get_pipeline,
+                enable_reranking=request.enable_reranking,
+                rerank_top_k=request.rerank_top_k or 5,
             )
 
         result = await _run_search(request.query)
@@ -311,14 +317,16 @@ async def query_documents_form(
                 document_ids=None,
                 config=config,
                 get_pipeline=get_pipeline,
+                enable_reranking=True,
+                rerank_top_k=5,
             )
 
         result = await _run_search(query)
 
-        # Build sources HTML with optional BM25 rerank scores
+        # Build sources HTML with hybrid scores
         sources_html = ''.join([f"""
         <div class="source-item">
-            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%}{"" if source.rerank_score is None else f", BM25: {source.rerank_score:.3f}"})<br>
+            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%}{f", BM25: {source.bm25_score:.3f}" if source.bm25_score else ""}{f", RRF: {source.rrf_score:.3f}" if source.rrf_score else ""}{f", Rerank: {source.rerank_score:.3f}" if source.rerank_score is not None else ""})<br>
             <em>Document: {source.document_id[:8]}... | Page: {source.page_number or 'N/A'}</em><br><br>
             <div style="white-space: pre-wrap; word-wrap: break-word;">{source.text}</div>
         </div>

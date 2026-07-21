@@ -587,11 +587,13 @@ HOME_PAGE_HTML = """
                 if (data.sources && data.sources.length > 0) {
                     const items = data.sources.map((s, i) => {
                         const sim = (s.similarity * 100).toFixed(1);
-                        const rerank = s.rerank_score != null ? ` &nbsp;·&nbsp; BM25: ${s.rerank_score.toFixed(3)}` : '';
+                        const bm25 = s.bm25_score != null ? ` &nbsp;·&nbsp; BM25: ${s.bm25_score.toFixed(3)}` : '';
+                        const rrf = s.rrf_score != null ? ` &nbsp;·&nbsp; RRF: ${s.rrf_score.toFixed(3)}` : '';
+                        const rerank = s.rerank_score != null ? ` &nbsp;·&nbsp; Rerank: ${s.rerank_score.toFixed(3)}` : '';
                         const docId = s.document_id ? s.document_id.substring(0, 8) + '...' : 'N/A';
                         const page = s.page_number != null ? ` &nbsp;·&nbsp; Page ${s.page_number}` : '';
                         return `<div class="source-item">
-                            <div class="source-meta">Source ${i + 1} &mdash; ${sim}% similarity${rerank} &nbsp;|&nbsp; Doc: ${escapeHtml(docId)}${page}</div>
+                            <div class="source-meta">Source ${i + 1} &mdash; ${sim}% similarity${bm25}${rrf}${rerank} &nbsp;|&nbsp; Doc: ${escapeHtml(docId)}${page}</div>
                             <div class="source-text">${escapeHtml(s.text)}</div>
                         </div>`;
                     }).join('');

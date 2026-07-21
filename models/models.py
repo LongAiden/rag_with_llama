@@ -8,7 +8,7 @@ class QueryRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=20)
     threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     document_ids: Optional[List[str]] = None
-    enable_reranking: bool = Field(default=False, description="Enable cross-encoder reranking")
+    enable_reranking: bool = Field(default=True, description="Enable cross-encoder reranking")
     rerank_top_k: Optional[int] = Field(None, ge=1, le=20, description="Number of results to return after reranking")
     model: str = Field(default="deepseek-r1:1.5b", description="LLM model to use for response generation")
     table_name: str = Field(default="document_chunks", description="Database table to search")
@@ -73,6 +73,10 @@ class RAGSource(BaseModel):
         default_factory=dict, description="Additional source metadata")
     rerank_score: Optional[float] = Field(
         None, description="Reranking score from cross-encoder model")
+    bm25_score: Optional[float] = Field(
+        None, description="BM25 lexical score")
+    rrf_score: Optional[float] = Field(
+        None, description="Reciprocal Rank Fusion score combining vector and BM25")
     graph_entities: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Entities associated with this chunk from the knowledge graph"

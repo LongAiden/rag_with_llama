@@ -504,6 +504,72 @@ class VectorStore:
             print(f"Error searching chunks: {e}")
             raise
 
+    async def search_bm25(
+        self,
+        query: str,
+        limit: int = 20,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """
+        Lexical retrieval using BM25Okapi over all chunks in the table.
+
+        Args:
+            query: Search query string
+            limit: Maximum number of results
+            document_ids: Optional list of document IDs to filter by
+
+        Returns:
+            List of chunks with bm25_score, sorted descending
+        """
+        from rank_bm25 import BM25Okapi
+        import numpy as np
+
+        try:
+            if not self._initialized:
+                await self._initialize_database()
+
+            conn = await self._get_connection()
+
+            base_query = f"""
+                SELECT id, text, metadata, document_id
+                FROM {self.safe_table_name}
+            """
+            params: list = []
+
+            if document_ids:
+                base_query += " WHERE document_id = ANY($1)"
+                params.append(document_ids)
+
+            rows = await conn.fetch(base_query, *params)
+            await self._release_connection(conn)
+
+            if not rows:
+                return []
+
+            corpus = [row['text'].lower().split() for row in rows]
+            bm25 = BM25Okapi(corpus)
+            tokenized_query = query.lower().split()
+            bm25_scores = bm25.get_scores(tokenized_query)
+
+            top_indices = np.argsort(bm25_scores)[::-1][:limit]
+
+            results = []
+            for idx in top_indices:
+                row = rows[idx]
+                results.append({
+                    'chunk_id': row['id'],
+                    'text': row['text'],
+                    'metadata': row['metadata'] if isinstance(row['metadata'], (dict, type(None))) else json.loads(row['metadata']),
+                    'document_id': row['document_id'],
+                    'bm25_score': float(bm25_scores[idx]),
+                })
+
+            return results
+
+        except Exception as e:
+            print(f"Error in BM25 search: {e}")
+            raise
+
     async def get_chunks_by_section(
         self,
         section_path: str,
