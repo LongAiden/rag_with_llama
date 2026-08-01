@@ -54,7 +54,7 @@ COPY migrations/ ./migrations/
 # This allows for live test development without rebuilding the image
 
 # Create required directories
-RUN mkdir -p /app/data /app/logs /app/uploads /app/htmlcov /app/tests
+RUN mkdir -p /app/data /app/logs /app/input/raw /app/htmlcov /app/tests
 
 # Default command runs all tests
 CMD ["pytest", "-v", "--cov=.", "--cov-report=html", "--cov-report=term"]

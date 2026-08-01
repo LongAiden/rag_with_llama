@@ -126,13 +126,18 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-}
+
+      # Ingestion settings
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
     ports:
       - "8000:8000"
     volumes:
       # Mount code for development (hot reload)
       - .:/app
-      # Persistent upload storage
-      - upload_data:/app/uploads
       # Logs
       - ./logs:/app/logs
     depends_on:
@@ -151,16 +156,16 @@ services:
     restart: unless-stopped
 
   # ============================================
-  # Celery Worker (reuses app image - no rebuild needed)
+  # Celery Worker - Default/RAG queue
   # ============================================
-  celery_worker:
+  celery_worker_rag:
     build:
       context: .
       dockerfile: deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
-    container_name: rag_celery_worker
+    container_name: rag_celery_worker_rag
     deploy:
       resources:
         limits:
@@ -169,7 +174,7 @@ services:
         reservations:
           cpus: "0.5"
           memory: 256M
-    command: celery -A worker.celery_app worker --loglevel=info
+    command: celery -A worker.celery_app worker -Q rag --loglevel=info
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -187,9 +192,168 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
     volumes:
       - .:/app
-      - upload_data:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Worker - Upload queue (single worker)
+  # ============================================
+  celery_worker_upload:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+      cache_from:
+        - rag_with_llama:latest
+    image: rag_with_llama:latest
+    container_name: rag_celery_worker_upload
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    command: celery -A worker.celery_app worker -Q upload --loglevel=info
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-rag_db}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
+      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Worker - Ingestion queue (scale to 2)
+  # Scale with: docker compose up --scale celery_worker_ingestion=2
+  # ============================================
+  celery_worker_ingestion:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+      cache_from:
+        - rag_with_llama:latest
+    image: rag_with_llama:latest
+    container_name: rag_celery_worker_ingestion
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    command: celery -A worker.celery_app worker -Q ingestion --loglevel=info
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-rag_db}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
+      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Beat - Scheduler
+  # ============================================
+  celery_beat:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+      cache_from:
+        - rag_with_llama:latest
+    image: rag_with_llama:latest
+    container_name: rag_celery_beat
+    command: celery -A worker.celery_app beat --loglevel=info
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-rag_db}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
+      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+    volumes:
+      - .:/app
       - ./logs:/app/logs
     depends_on:
       postgres:
@@ -330,8 +494,6 @@ networks:
 # ============================================
 volumes:
   postgres_data:
-    driver: local
-  upload_data:
     driver: local
   pgadmin_data:
     driver: local

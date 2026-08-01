@@ -69,7 +69,7 @@ COPY repositories/ ./repositories/
 COPY observability/ ./observability/
 
 # Required directories for runtime state
-RUN mkdir -p /app/data /app/logs /app/uploads
+RUN mkdir -p /app/data /app/logs /app/input/raw
 
 # Security: Run as non-root user
 RUN useradd -m -u 1000 appuser && \

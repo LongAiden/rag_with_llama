@@ -82,6 +82,13 @@ class AppSettings(BaseSettings):
     # Table
     table_name: str = Field(default=DEFAULT_TABLE_NAME)
 
+    # Ingestion pipeline settings
+    input_raw_dir: str = Field(default='input/raw', validation_alias='INPUT_RAW_DIR')
+    ingestion_max_attempts: int = Field(default=2, validation_alias='INGESTION_MAX_ATTEMPTS')
+    ingestion_claim_timeout_minutes: int = Field(default=30, validation_alias='INGESTION_CLAIM_TIMEOUT_MINUTES')
+    default_chunk_size: int = Field(default=512, validation_alias='DEFAULT_CHUNK_SIZE')
+    default_parse_backend: str = Field(default='ollama', validation_alias='DEFAULT_PARSE_BACKEND')
+
     # Langfuse observability (optional)
     langfuse_host: Optional[str] = Field(default=None, validation_alias='LANGFUSE_HOST')
     langfuse_public_key: Optional[str] = Field(default=None, validation_alias='LANGFUSE_PUBLIC_KEY')

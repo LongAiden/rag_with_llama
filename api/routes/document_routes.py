@@ -2,13 +2,14 @@
 API routes for the RAG application.
 FastAPI endpoints for upload, query, stats, health checks, and table management.
 """
+import os
 import uuid
 import traceback
 import logfire
 from pathlib import Path
 from typing import Optional, List
 
-
+from celery import chain
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Header
 from fastapi.responses import HTMLResponse
 
@@ -16,10 +17,13 @@ from api.config import DEFAULT_TABLE_NAME, DEFAULT_CHUNKING_SIMILARITY
 from api.validators import (
     validate_upload_params,
     require_access_password,
-    celery_upload_enabled
 )
+from repositories.ingestion_repository import IngestionRepository
 from repositories.table_repository import TableRepository, validate_table_name
 from retrieval.search import perform_document_search
+from worker.ingestion_tasks import parse_document_task, chunk_document_task, embed_document_task
+
+INPUT_RAW_DIR = Path(os.getenv("INPUT_RAW_DIR", "input/raw"))
 
 try:
     from langfuse.decorators import observe, langfuse_context
@@ -70,131 +74,79 @@ async def upload_and_process(
     config=None,
     get_pipeline=None
 ):
-    """Upload and process document with comprehensive validation and pgvector storage."""
+    """Upload a document, persist the raw file, and queue it for processing."""
     require_access_password(access_password or x_app_password)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    # Validate parameters
     validate_upload_params(chunk_size, file.content_type)
 
-    # Generate unique document ID
     document_id = str(uuid.uuid4())
-    processed_id = document_id
-    temp_dir = Path("temp_uploads")
-    temp_dir.mkdir(exist_ok=True)
-    temp_path = temp_dir / f"{document_id}_{file.filename}"
-    cleanup_temp = True
+    INPUT_RAW_DIR.mkdir(parents=True, exist_ok=True)
+    raw_path = INPUT_RAW_DIR / f"{document_id}_{file.filename}"
 
     try:
-        # Write temporary file for validation
         content = await file.read()
-        with open(temp_path, "wb") as f:
+        with open(raw_path, "wb") as f:
             f.write(content)
 
-        # Comprehensive file validation
-        validation_result = config.file_validator.validate_file(str(temp_path))
+        validation_result = config.file_validator.validate_file(str(raw_path))
         if not validation_result.is_valid:
+            try:
+                raw_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=400,
                 detail=f"File validation failed: {validation_result.error_message}"
             )
 
-        # Process with pgvector pipeline using specified table
-        pipeline = await get_pipeline(table_name)
+        repo = IngestionRepository(connection_string=config.connection_string)
+        await repo.register_document(
+            doc_id=document_id,
+            file_name=file.filename,
+            raw_storage_path=str(raw_path.resolve()),
+            file_size=validation_result.file_size,
+            content_type=file.content_type or "application/octet-stream",
+            target_table_name=table_name,
+            chunk_size=chunk_size,
+            parse_backend=parse_backend,
+            metadata={
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "file_size": validation_result.file_size,
+                "upload_timestamp": str(uuid.uuid1().time),
+                "validation_passed": True,
+            },
+        )
 
-        if celery_upload_enabled():
-            try:
-                from worker.tasks import process_upload_task
+        task_chain = chain(
+            parse_document_task.s(document_id),
+            chunk_document_task.s(document_id),
+            embed_document_task.s(document_id),
+        )
+        async_task = task_chain.apply_async(queue="upload")
 
-                async_task = process_upload_task.apply_async(
-                    kwargs={
-                        "temp_path": str(temp_path),
-                        "document_id": document_id,
-                        "filename": file.filename,
-                        "content_type": file.content_type or "application/octet-stream",
-                        "file_size": validation_result.file_size,
-                        "chunk_size": chunk_size,
-                        "table_name": table_name,
-                    }
-                )
-
-                logfire.info(
-                    "Upload queued for Celery worker",
-                    document_id=document_id,
-                    filename=file.filename,
-                    task_id=async_task.id,
-                    table_name=table_name,
-                )
-
-                cleanup_temp = False  # worker will remove the temp file
-
-                return UploadResponse(
-                    status="queued",
-                    document_id=document_id,
-                    filename=file.filename,
-                    message=f"Upload queued for processing. Task {async_task.id}",
-                    chunks_created=None,
-                    task_id=async_task.id,
-                )
-            except Exception as celery_error:
-                logfire.warning(
-                    "Celery upload dispatch failed; running inline",
-                    document_id=document_id,
-                    filename=file.filename,
-                    error=str(celery_error),
-                    table_name=table_name,
-                )
-
-        with logfire.span("document_insertion",
-                          document_id=document_id,
-                          filename=file.filename,
-                          chunk_size=chunk_size,
-                          table_name=table_name):
-            logfire.info("Starting document processing",
-                         document_id=document_id,
-                         filename=file.filename,
-                         file_size=validation_result.file_size)
-
-            processed_id = await pipeline.ingest_document(
-                file_path=str(temp_path),
-                chunk_size=chunk_size,
-                similarity_threshold=DEFAULT_CHUNKING_SIMILARITY,
-                document_id=document_id,
-                parse_backend=parse_backend,
-                metadata={
-                    'filename': file.filename,
-                    'content_type': file.content_type,
-                    'file_size': validation_result.file_size,
-                    'upload_timestamp': str(uuid.uuid1().time),
-                    'validation_passed': True
-                }
-            )
-
-            logfire.info("Document processing completed successfully",
-                         document_id=processed_id,
-                         filename=file.filename)
-
-        logfire.info("Upload and processing pipeline completed",
-                     document_id=processed_id,
-                     filename=file.filename)
-
-        table_count_result = await get_table_count(pipeline=pipeline)
-        current_table_count = table_count_result.get("table_count")
+        logfire.info(
+            "Upload queued for Celery worker",
+            document_id=document_id,
+            filename=file.filename,
+            task_id=async_task.id,
+            table_name=table_name,
+        )
 
         return UploadResponse(
-            status="success",
-            document_id=processed_id,
+            status="queued",
+            document_id=document_id,
             filename=file.filename,
-            message="Document processed successfully.",
+            message=f"Upload queued for processing. Task {async_task.id}",
             chunks_created=None,
-            table_count=current_table_count,
-            task_id=None
+            task_id=async_task.id,
         )
 
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         tb = traceback.format_exc()
         logfire.error(
@@ -210,10 +162,6 @@ async def upload_and_process(
             status_code=500,
             detail=f"Processing failed: {type(e).__name__}: {e}"
         )
-    finally:
-        # Cleanup temporary file
-        if cleanup_temp:
-            temp_path.unlink(missing_ok=True)
 
 
 async def _execute_traced_search(
@@ -551,6 +499,36 @@ async def get_supported_types(config=None):
             "processor_pattern": "Abstract Method + Factory Method"
         }
     }
+
+
+@router.get("/documents/{document_id}/status")
+async def get_document_status(
+    document_id: str,
+    config=None,
+):
+    """Return the ingestion status of a document from the status DB."""
+    try:
+        repo = IngestionRepository(connection_string=config.connection_string)
+        status = await repo.get_document_status(document_id)
+        if not status:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {
+            "document_id": status["id"],
+            "file_name": status["file_name"],
+            "stage": status["stage"],
+            "attempts": status["attempts"],
+            "chunk_count": status["chunk_count"],
+            "last_error": status["last_error"],
+            "created_at": status["created_at"],
+            "updated_at": status["updated_at"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get document status: {type(e).__name__}: {e}"
+        )
 
 
 @router.delete("/table/{table_name}")

@@ -1,4 +1,5 @@
 from ingestion.processors.processor_factory import get_processor_for_file
+from ingestion.processors.page_utils import get_page_number_for_position
 from ingestion.text_cleaning.cleaners import TextCleaningPipeline
 from repositories.table_repository import quote_ident
 from repositories.connection_pool import ConnectionPoolManager
@@ -671,76 +672,94 @@ class ChunkEmbeddingPipeline:
         self.embedding_generator = EmbeddingGenerator(embedding_model)
         self.vector_store = VectorStore(db_params, table_name)
 
-    async def ingest_document(self, file_path: str, chunk_size: int = 512,
-                              similarity_threshold: float = 0.5,
-                              document_id: str = None, metadata: Dict = None,
-                              chunker_type: str = None,
-                              parse_backend: str = "") -> str:
+    async def parse_file(
+        self,
+        file_path: str,
+        document_id: str,
+        parse_backend: str = "",
+    ) -> Dict[str, Any]:
         """
-        Ingest a document: chunk using imported function, then embed and store.
-
-        Args:
-            file_path: Path to the document file
-            chunk_size: Maximum tokens per chunk
-            similarity_threshold: Similarity threshold for chunking
-            document_id: Optional document ID (if None, will generate one)
-            metadata: Additional metadata for the document
+        Parse a document into raw text/markdown without chunking or embedding.
 
         Returns:
-            Document ID
+            Dict with parsed_text, parser_used, filename, file_type, file_size,
+            and page_mapping (for non-PDF files).
         """
         file_path = Path(file_path)
         filename = file_path.name
         file_type = file_path.suffix.lower().replace('.', '')
         file_size = file_path.stat().st_size
 
-        # Generate document ID if not provided
-        if document_id is None:
-            document_id = str(uuid.uuid4())
+        print(f"Parsing document: {filename} (ID: {document_id})")
 
-        print(f"Processing document: {filename} (ID: {document_id})")
-
-        # Step 1: PDF → Markdown → MarkdownChunker
-        #         Non-PDF (DOCX, TXT) → raw text extraction via processor factory
         if file_path.suffix.lower() == '.pdf':
-            from ingestion.chunking.chunker_factory import chunk_markdown
             from ingestion.processors.pdf_parser_factory import create_pdf_parser
             from config.app_config import AppSettings
 
-            # Convert PDF to Markdown and save to input/markdown/
-            markdown_dir = Path("input/markdown")
-            markdown_dir.mkdir(parents=True, exist_ok=True)
-            markdown_path = markdown_dir / file_path.with_suffix('.md').name
+            settings = AppSettings()
+            backend = parse_backend or settings.pdf_parser_backend
+            parser = create_pdf_parser(backend, settings)
+            parsed_text = parser.parse_pdf(str(file_path), output_path=None)
+            parser_used = parser.get_backend_name()
+            page_mapping: List[Any] = []
+        else:
+            processor = get_processor_for_file(str(file_path))
+            if not processor.validate_file(str(file_path)):
+                raise ValueError(f"Invalid file: {file_path}")
+            parsed_text, page_mapping = processor.extract_text(str(file_path))
+            parser_used = processor.__class__.__name__
 
-            parser = create_pdf_parser(parse_backend, AppSettings())
-            markdown = parser.parse_pdf(str(file_path), output_path=str(markdown_path))
+        logfire.info("Document parsed",
+                     document_id=document_id,
+                     parser_used=parser_used,
+                     file_type=file_type,
+                     file_size=file_size,
+                     text_length=len(parsed_text))
 
-            logfire.info("PDF converted to Markdown",
-                         source=str(file_path),
-                         output=str(markdown_path),
-                         markdown_length=len(markdown))
+        return {
+            "parsed_text": parsed_text,
+            "parser_used": parser_used,
+            "filename": filename,
+            "file_type": file_type,
+            "file_size": file_size,
+            "page_mapping": page_mapping,
+        }
 
-            # Chunk the Markdown (defaults to MarkdownChunker)
+    def chunk_parsed_document(
+        self,
+        parsed_result: Dict[str, Any],
+        chunk_size: int = 512,
+        similarity_threshold: float = 0.5,
+        chunker_type: Optional[str] = None,
+    ) -> List[Any]:
+        """
+        Chunk parsed text. For PDFs, uses markdown-aware chunking and page
+        markers; for DOCX/TXT, uses the standard chunker factory.
+        """
+        parsed_text = parsed_result["parsed_text"]
+        file_type = parsed_result["file_type"]
+        filename = parsed_result["filename"]
+
+        if file_type == 'pdf':
+            from ingestion.chunking.chunker_factory import chunk_markdown
+
             chunks = chunk_markdown(
-                markdown,
+                parsed_text,
                 chunker_type=chunker_type,
                 chunk_size=chunk_size,
                 chunk_overlap=50,
                 similarity_threshold=similarity_threshold,
             )
 
-            # Assign page numbers, add section hierarchy prefix, and cache page content
             page_content_cache: Dict[int, str] = {}
             last_section_prefix = ""
             for chunk in chunks:
                 if hasattr(chunk, 'start_index') and chunk.start_index is not None:
-                    segment = markdown[:chunk.start_index]
+                    segment = parsed_text[:chunk.start_index]
                     page_matches = list(re.finditer(r'\[Page (\d+)\]', segment))
                     chunk.page_number = int(page_matches[-1].group(1)) if page_matches else 1
 
-                    # Prepend section hierarchy: "[H1].[H2] - chunk text"
-                    # Fall back to the previous chunk's section if this chunk has none
-                    section_prefix = _extract_section_hierarchy(markdown, chunk.start_index)
+                    section_prefix = _extract_section_hierarchy(parsed_text, chunk.start_index)
                     if not section_prefix:
                         section_prefix = last_section_prefix
                     else:
@@ -755,31 +774,54 @@ class ChunkEmbeddingPipeline:
                     if last_section_prefix:
                         chunk.text = f"{last_section_prefix} - {chunk.text}"
 
-                # Cache full page content (extracted once per unique page)
                 pg = chunk.page_number
                 if pg not in page_content_cache:
-                    page_content_cache[pg] = _extract_page_content(markdown, pg)
-
+                    page_content_cache[pg] = _extract_page_content(parsed_text, pg)
+                chunk.full_content = page_content_cache.get(pg, "")
         else:
-            page_content_cache: Dict[int, str] = {}
-            # Non-PDF: DOCX, TXT - existing processor flow
-            processor = get_processor_for_file(str(file_path))
-            chunks = processor.process_document(
-                file_path=str(file_path),
-                chunk_size=chunk_size,
-                similarity_threshold=similarity_threshold,
-                embedding_model=None,
+            from ingestion.chunking.chunker_factory import get_chunker
+
+            chunker = get_chunker(
                 chunker_type=chunker_type,
+                chunk_size=chunk_size,
+                chunk_overlap=50,
+                similarity_threshold=similarity_threshold,
+                text_length=len(parsed_text),
             )
+            chunks = chunker.chunk(parsed_text)
+            page_mapping = parsed_result.get("page_mapping", [])
+            for chunk in chunks:
+                if hasattr(chunk, 'start_index') and page_mapping:
+                    chunk.page_number = get_page_number_for_position(chunk.start_index, page_mapping)
+                else:
+                    chunk.page_number = 1
+                chunk.section_path = ""
+                chunk.full_content = parsed_text
 
         print(f"Created {len(chunks)} chunks from {filename}")
+        return chunks
 
-        # Prepare chunks for embedding - filter out chunks with invalid text
+    async def embed_chunks(
+        self,
+        chunks: List[Any],
+        document_id: str,
+        chunk_size: int,
+        similarity_threshold: float,
+        filename: str,
+        file_type: str,
+        file_size: int,
+        parser_used: str,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """
+        Clean, embed, and store chunks in the vector DB.
+        """
         valid_chunks = []
         invalid_chunks = 0
 
         for chunk in chunks:
-            if chunk.text is None or (isinstance(chunk.text, str) and len(chunk.text.strip()) == 0):
+            text = getattr(chunk, 'text', None)
+            if text is None or (isinstance(text, str) and len(text.strip()) == 0):
                 invalid_chunks += 1
                 logfire.warn("Skipping chunk with None or empty text",
                              chunk_info=str(chunk)[:100])
@@ -794,110 +836,79 @@ class ChunkEmbeddingPipeline:
 
         if not valid_chunks:
             raise ValueError(
-                f"No valid chunks created from document {document_id}. All {len(chunks)} chunks had None or empty text.")
+                f"No valid chunks created from document {document_id}. "
+                f"All {len(chunks)} chunks had None or empty text.")
 
-        # Initialize robust text cleaning pipeline
         text_cleaner = TextCleaningPipeline()
-
-        # Extract text and apply robust cleaning
         chunk_texts = []
         for chunk in valid_chunks:
-            # Handle different chunk object types from Chonkie
-            if hasattr(chunk, 'text'):
-                text = chunk.text
-            elif isinstance(chunk, dict):
-                text = chunk.get('text', '')
-            elif isinstance(chunk, str):
-                text = chunk
-            else:
-                text = str(chunk)
-
-            # Ensure text is a plain Python string
+            text = getattr(chunk, 'text', '')
             if isinstance(text, bytes):
                 text = text.decode('utf-8', errors='replace')
             elif not isinstance(text, str):
                 text = str(text)
-
-            # Apply comprehensive text cleaning pipeline
-            # Handles: surrogates, math notation, tables, special symbols, whitespace
             text = text_cleaner.clean(text, log_steps=False)
-
+            chunk.text = text
             chunk_texts.append(text)
-
-            # Also update the chunk object's text for database storage
-            if hasattr(chunk, 'text'):
-                chunk.text = text
 
         logfire.info("Extracted chunk texts for embedding",
                      num_chunks=len(chunk_texts),
                      sample_types=[type(t).__name__ for t in chunk_texts[:3]])
 
-        # Generate embeddings in batch
         logfire.info("Stage: generating embeddings", num_chunks=len(chunk_texts))
         print("Generating embeddings...")
         try:
             embeddings = self.embedding_generator.embed_batch(chunk_texts)
         except Exception as e:
             tb = traceback.format_exc()
-            logfire.error(
-                "Stage FAILED: embedding generation",
-                error_type=type(e).__name__,
-                error=str(e),
-                traceback=tb,
-            )
+            logfire.error("Stage FAILED: embedding generation",
+                          error_type=type(e).__name__, error=str(e), traceback=tb)
             print(f"[EMBED ERROR] {type(e).__name__}: {e}\n{tb}", flush=True)
             raise
-        logfire.info("Stage: embeddings generated", num_embeddings=len(embeddings))
 
-        # Update chunks reference to use only valid chunks
+        logfire.info("Stage: embeddings generated", num_embeddings=len(embeddings))
         chunks = valid_chunks
 
-        # Create Chunk objects for database storage
         chunk_objects = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            # Extract page number from chunk (set by imported process_document function)
             page_number = getattr(chunk, 'page_number', 1)
-
-            raw_page_content = page_content_cache.get(page_number, "")
-            raw_full_content = getattr(chunk, 'full_content', '') or ''
+            raw_page_content = getattr(chunk, 'full_content', '') or ''
 
             if len(raw_page_content) > 10000:
-                logfire.warn("Large page_content in metadata — consider moving to a dedicated column",
+                logfire.warn("Large page_content in metadata",
                              page_number=page_number,
                              char_count=len(raw_page_content))
 
             chunk_metadata = {
                 'chunk_index': i,
-                'token_count': chunk.token_count,
+                'token_count': getattr(chunk, 'token_count', None),
                 'start_index': getattr(chunk, 'start_index', None),
                 'end_index': getattr(chunk, 'end_index', None),
                 'page_number': page_number,
                 'section_path': getattr(chunk, 'section_path', ''),
                 'page_content': raw_page_content,
-                'full_content': raw_full_content,
+                'full_content': raw_page_content,
                 'chunk_size': chunk_size,
                 'similarity_threshold': similarity_threshold,
                 'embedding_model': self.embedding_generator.model_name,
                 'embedding_dimension': len(embedding),
                 'filename': filename,
                 'file_type': file_type,
-                'file_size': file_size
+                'file_size': file_size,
+                'parser_used': parser_used,
             }
 
-            # Add any additional metadata
             if metadata:
                 chunk_metadata.update(metadata)
 
-            chunk_obj = Chunk(
+            chunk_objects.append(Chunk(
                 id=str(uuid.uuid4()),
                 document_id=document_id,
                 text=chunk.text,
                 embedding=embedding,
-                metadata=chunk_metadata
-            )
-            chunk_objects.append(chunk_obj)
+                metadata=chunk_metadata,
+            ))
 
-        # Store in database using pgvector
         logfire.info("Stage: inserting chunks into DB",
                      num_chunks=len(chunk_objects),
                      table_name=self.vector_store.table_name)
@@ -906,22 +917,67 @@ class ChunkEmbeddingPipeline:
             await self.vector_store.add_chunks(chunk_objects)
         except Exception as e:
             tb = traceback.format_exc()
-            logfire.error(
-                "Stage FAILED: DB insertion",
-                num_chunks=len(chunk_objects),
-                table_name=self.vector_store.table_name,
-                error_type=type(e).__name__,
-                error=str(e),
-                traceback=tb,
-            )
+            logfire.error("Stage FAILED: DB insertion",
+                          num_chunks=len(chunk_objects),
+                          table_name=self.vector_store.table_name,
+                          error_type=type(e).__name__, error=str(e), traceback=tb)
             print(f"[INSERT ERROR] {type(e).__name__}: {e}\n{tb}", flush=True)
             raise
+
         logfire.info("Stage: DB insertion complete",
                      num_chunks=len(chunk_objects),
                      document_id=document_id)
 
-        print(
-            f"Successfully processed {filename} -> Document ID: {document_id}")
+    async def ingest_document(self, file_path: str, chunk_size: int = 512,
+                              similarity_threshold: float = 0.5,
+                              document_id: str = None, metadata: Dict = None,
+                              chunker_type: str = None,
+                              parse_backend: str = "") -> str:
+        """
+        Backward-compatible wrapper: parse, chunk, embed, and store.
+
+        Args:
+            file_path: Path to the document file
+            chunk_size: Maximum tokens per chunk
+            similarity_threshold: Similarity threshold for chunking
+            document_id: Optional document ID (if None, will generate one)
+            metadata: Additional metadata for the document
+
+        Returns:
+            Document ID
+        """
+        file_path = Path(file_path)
+        filename = file_path.name
+
+        if document_id is None:
+            document_id = str(uuid.uuid4())
+
+        print(f"Processing document: {filename} (ID: {document_id})")
+
+        parsed = await self.parse_file(
+            file_path=str(file_path),
+            document_id=document_id,
+            parse_backend=parse_backend,
+        )
+        chunks = self.chunk_parsed_document(
+            parsed,
+            chunk_size=chunk_size,
+            similarity_threshold=similarity_threshold,
+            chunker_type=chunker_type,
+        )
+        await self.embed_chunks(
+            chunks=chunks,
+            document_id=document_id,
+            chunk_size=chunk_size,
+            similarity_threshold=similarity_threshold,
+            filename=parsed["filename"],
+            file_type=parsed["file_type"],
+            file_size=parsed["file_size"],
+            parser_used=parsed["parser_used"],
+            metadata=metadata,
+        )
+
+        print(f"Successfully processed {filename} -> Document ID: {document_id}")
         return document_id
 
     async def search_documents(self, query: str, limit: int = 5, threshold: float = 0.5,

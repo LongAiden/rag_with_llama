@@ -12,7 +12,6 @@ Core functionality is distributed across specialized modules:
 - ingestion/chunking/chunker_factory.py: Chunking strategies
 """
 
-from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, Header
@@ -22,21 +21,12 @@ from fastapi.staticfiles import StaticFiles
 from api.config import AppConfig, DEFAULT_TABLE_NAME, DEFAULT_EMBEDDING_MODEL
 from ingestion.embedding.vector_store import ChunkEmbeddingPipeline
 from models.models import QueryRequest, UploadResponse, RAGResponse
-from migrations.runner import run_migrations
-
 # Global configuration
 config = AppConfig()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Run migrations on startup, then yield to the application."""
-    await run_migrations(config.connection_string)
-    yield
-
-
 # Initialize FastAPI application
-app = FastAPI(title="pgvector RAG API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="pgvector RAG API", version="1.0.0")
 app.mount("/images", StaticFiles(directory="images"), name="images")
 
 
@@ -93,6 +83,7 @@ from api.routes.document_routes import (
     get_database_stats,
     health_check,
     get_supported_types,
+    get_document_status,
     delete_table
 )
 
@@ -183,6 +174,11 @@ async def health_route():
 @app.get("/supported-types")
 async def supported_types_route():
     return await get_supported_types(config=config)
+
+
+@app.get("/documents/{document_id}/status")
+async def document_status_route(document_id: str):
+    return await get_document_status(document_id=document_id, config=config)
 
 
 @app.delete("/table/{table_name}")
