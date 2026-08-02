@@ -237,29 +237,9 @@ CREATE OR REPLACE FUNCTION calculate_entity_pagerank(
     damping_factor FLOAT DEFAULT 0.85,
     max_iterations INTEGER DEFAULT 100
 ) RETURNS TABLE(
-    entity_id UUID,
-    entity_name TEXT,
-    pagerank_score FLOAT
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        en.entity_id,
-        e.entity_name,
-        pr.pagerank::FLOAT as pagerank_score
-    FROM pgr_pageRank(
-        'SELECT id, source, target, cost FROM entity_edges',
-        directed := false,
-        damping := damping_factor,
-        max_iter := max_iterations
-    ) pr
-    JOIN entity_nodes en ON pr.node = en.node_id
-    JOIN entities e ON en.entity_id = e.entity_id
-    ORDER BY pr.pagerank DESC;
-END;
-$$ LANGUAGE plpgsql;
-
-COMMENT ON FUNCTION calculate_entity_pagerank IS 'Calculate PageRank scores to find important entities';
+-- NOTE: pgr_pageRank function does not exist in pgRouting
+-- This function is disabled until a proper PageRank implementation is added
+-- Consider using pg_rank extension or implementing PageRank in application code
 
 -- ============================================
 -- CHUNKS TABLE (Document Storage)

@@ -3,18 +3,17 @@ Configuration management for the RAG application.
 Handles environment setup, database configuration, and service initialization.
 """
 
+import logging
 import os
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import logfire
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
-from pydantic_ai.providers.ollama import OllamaProvider
 
 from ingestion.validation.file_validator import FileValidator, FileValidationConfig
-from models.models import SimpleRAGResponse
+
+logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_TABLE_NAME = "document_chunks"
@@ -114,7 +113,6 @@ class AppConfig:
 
         # Service initialization (lazy loading for performance)
         self.file_validator = FileValidator(FileValidationConfig())
-        self.agent = self._configure_pydantic_ai()
         self.pipeline = None  # Lazy initialization
         self.reranker = None  # Lazy initialization
         self.graph_pool = None  # Lazy initialization
@@ -128,56 +126,10 @@ class AppConfig:
         """Configure logfire with token from settings."""
         if self.settings.logfire_write_token:
             logfire.configure(token=self.settings.logfire_write_token)
-            print("✓ Logfire configured successfully")
+            logger.info("Logfire configured successfully")
         else:
-            print("⚠️ LOGFIRE_WRITE_TOKEN not found, using default configuration")
+            logger.warning("LOGFIRE_WRITE_TOKEN not found, using default configuration")
             logfire.configure()
-
-    def _configure_pydantic_ai(self) -> Optional[Agent]:
-        """Configure Pydantic AI Agent with Ollama via OpenAI-compatible endpoint."""
-        try:
-            model = OpenAIModel(
-                self.settings.ollama_model,
-                provider=OllamaProvider(base_url=self.settings.ollama_base_url),
-            )
-
-            agent = Agent(
-                model,
-                output_type=SimpleRAGResponse,
-                system_prompt="""You are a precise RAG (Retrieval-Augmented Generation) assistant.
-Your job is to answer the user's question using ONLY the provided document sources.
-
-Each source is structured as:
-  [Source N (Page P)]
-  [Matched chunk]: The specific passage retrieved by semantic search. It may begin with a
-    section prefix like [Chapter].[Section] that shows where in the document it lives.
-  [Full page context]: The complete text of that page, giving you broader surrounding context.
-
-How to use the sources:
-1. Read the [Matched chunk] first — it is the most semantically relevant passage.
-2. Consult [Full page context] to understand the surrounding information and fill gaps.
-3. Use the section prefix (e.g. [Chapter 3].[Security Threats]) to identify which part of the
-   document the chunk belongs to and include that in your citations when helpful.
-4. ALWAYS extract and state the relevant information — never say "I cannot find it" when the
-   sources clearly contain the answer.
-5. Quote or paraphrase key facts, definitions, steps, and explanations directly from the text.
-6. Cite sources and page numbers (e.g. "Source 2, Page 7") whenever available.
-7. If multiple sources address the same topic, synthesize them into one coherent answer.
-8. Only state that information is unavailable if it is genuinely absent from ALL provided sources.
-
-Respond with:
-- answer: A thorough, well-cited response grounded in the sources
-- confidence: Float 0-1 reflecting how completely the sources answer the question
-- word_count: Number of words in your answer
-- sources_used: Number of sources used (provided in the message)
-- metadata: Any additional relevant notes (e.g. ambiguities, conflicting sources)"""
-            )
-
-            print("✓ Pydantic AI Agent configured successfully (Ollama)")
-            return agent
-        except Exception as e:
-            print(f"❌ Pydantic AI configuration failed: {e}")
-        return None
 
 
 def get_ollama_model() -> str:

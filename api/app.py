@@ -84,6 +84,7 @@ from api.routes.document_routes import (
     health_check,
     get_supported_types,
     get_document_status,
+    delete_document,
     delete_table
 )
 
@@ -179,6 +180,23 @@ async def supported_types_route():
 @app.get("/documents/{document_id}/status")
 async def document_status_route(document_id: str):
     return await get_document_status(document_id=document_id, config=config)
+
+
+@app.delete("/documents/{document_id}")
+async def delete_document_route(
+    document_id: str,
+    delete_chunks: bool = True,
+    delete_raw_file: bool = True,
+    x_app_password: Optional[str] = Header(default=None),
+):
+    return await delete_document(
+        document_id=document_id,
+        delete_chunks=delete_chunks,
+        delete_raw_file=delete_raw_file,
+        x_app_password=x_app_password,
+        config=config,
+        get_pipeline=get_pipeline,
+    )
 
 
 @app.delete("/table/{table_name}")

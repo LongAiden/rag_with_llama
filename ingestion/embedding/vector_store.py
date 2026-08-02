@@ -9,7 +9,6 @@ from sentence_transformers import SentenceTransformer
 import asyncio
 import os
 import re
-import json
 import traceback
 import uuid
 import asyncpg
@@ -393,12 +392,14 @@ class VectorStore:
                 # Convert embedding list to proper pgvector format
                 embedding_str = '[' + ','.join(map(str, chunk.embedding)) + ']'
 
+                # metadata is passed as a dict — the pool registers a jsonb codec
+                # (see repositories/connection_pool.py), so asyncpg encodes it.
                 chunk_data.append((
                     chunk.id,
                     chunk.document_id,
                     chunk.text,
                     embedding_str,
-                    json.dumps(chunk.metadata if chunk.metadata else {})
+                    chunk.metadata if chunk.metadata else {}
                 ))
 
             # Use asyncpg's executemany for efficient batch insert
@@ -493,7 +494,7 @@ class VectorStore:
                 results.append({
                     'chunk_id': row['id'],
                     'text': row['text'],
-                    'metadata': row['metadata'] if isinstance(row['metadata'], (dict, type(None))) else json.loads(row['metadata']),
+                    'metadata': row['metadata'],
                     'document_id': row['document_id'],
                     'similarity': float(row['similarity'])
                 })
@@ -560,7 +561,7 @@ class VectorStore:
                 results.append({
                     'chunk_id': row['id'],
                     'text': row['text'],
-                    'metadata': row['metadata'] if isinstance(row['metadata'], (dict, type(None))) else json.loads(row['metadata']),
+                    'metadata': row['metadata'],
                     'document_id': row['document_id'],
                     'bm25_score': float(bm25_scores[idx]),
                 })
@@ -598,7 +599,7 @@ class VectorStore:
                 {
                     'chunk_id': row['id'],
                     'text': row['text'],
-                    'metadata': row['metadata'] if isinstance(row['metadata'], (dict, type(None))) else json.loads(row['metadata']),
+                    'metadata': row['metadata'],
                     'document_id': row['document_id'],
                 }
                 for row in rows
@@ -672,14 +673,17 @@ class ChunkEmbeddingPipeline:
         self.embedding_generator = EmbeddingGenerator(embedding_model)
         self.vector_store = VectorStore(db_params, table_name)
 
+    @staticmethod
     async def parse_file(
-        self,
         file_path: str,
         document_id: str,
         parse_backend: str = "",
     ) -> Dict[str, Any]:
         """
         Parse a document into raw text/markdown without chunking or embedding.
+
+        Static because parsing needs no embedding model — the ingestion worker
+        calls it on the class so the parse stage does not pay for loading one.
 
         Returns:
             Dict with parsed_text, parser_used, filename, file_type, file_size,
@@ -725,8 +729,8 @@ class ChunkEmbeddingPipeline:
             "page_mapping": page_mapping,
         }
 
+    @staticmethod
     def chunk_parsed_document(
-        self,
         parsed_result: Dict[str, Any],
         chunk_size: int = 512,
         similarity_threshold: float = 0.5,
@@ -735,6 +739,8 @@ class ChunkEmbeddingPipeline:
         """
         Chunk parsed text. For PDFs, uses markdown-aware chunking and page
         markers; for DOCX/TXT, uses the standard chunker factory.
+
+        Static because chunking needs no embedding model — see parse_file.
         """
         parsed_text = parsed_result["parsed_text"]
         file_type = parsed_result["file_type"]

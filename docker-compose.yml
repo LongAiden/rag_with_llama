@@ -93,7 +93,7 @@ services:
       # Ollama (runs on Windows host, accessible via host.docker.internal)
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
-      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:4b}
+      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
 
       # API Keys
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
@@ -156,61 +156,9 @@ services:
     restart: unless-stopped
 
   # ============================================
-  # Celery Worker - Default/RAG queue
-  # ============================================
-  celery_worker_rag:
-    build:
-      context: .
-      dockerfile: deployment/Dockerfile
-      cache_from:
-        - rag_with_llama:latest
-    image: rag_with_llama:latest
-    container_name: rag_celery_worker_rag
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 1G
-        reservations:
-          cpus: "0.5"
-          memory: 256M
-    command: celery -A worker.celery_app worker -Q rag --loglevel=info
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-rag_db}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
-      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
-      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
-      INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
-      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
-      DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
-      DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
-    volumes:
-      - .:/app
-      - ./logs:/app/logs
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - rag_network
-    restart: unless-stopped
-
-  # ============================================
   # Celery Worker - Upload queue (single worker)
+  # Serves interactive uploads from the UI, kept separate from the
+  # ingestion queue so a long directory scan cannot starve them.
   # ============================================
   celery_worker_upload:
     build:

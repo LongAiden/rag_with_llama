@@ -6,10 +6,10 @@ import os
 import uuid
 import traceback
 import logfire
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
 
-from celery import chain
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Header
 from fastapi.responses import HTMLResponse
 
@@ -21,7 +21,7 @@ from api.validators import (
 from repositories.ingestion_repository import IngestionRepository
 from repositories.table_repository import TableRepository, validate_table_name
 from retrieval.search import perform_document_search
-from worker.ingestion_tasks import parse_document_task, chunk_document_task, embed_document_task
+from worker.ingestion_tasks import UPLOAD_QUEUE, build_ingestion_chain
 
 INPUT_RAW_DIR = Path(os.getenv("INPUT_RAW_DIR", "input/raw"))
 
@@ -80,11 +80,21 @@ async def upload_and_process(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
+    # Validate the upload parameters
     validate_upload_params(chunk_size, file.content_type)
+    # table_name reaches DDL via the vector store — same check the delete route applies.
+    validate_table_name(table_name)
 
+    # Strip any directory component: an UploadFile filename is client-controlled and
+    # FastAPI does not sanitise it, so '../../x' would escape INPUT_RAW_DIR.
+    safe_filename = Path(file.filename).name
+    if not safe_filename or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid file name")
+
+    # Create uuid for a document
     document_id = str(uuid.uuid4())
     INPUT_RAW_DIR.mkdir(parents=True, exist_ok=True)
-    raw_path = INPUT_RAW_DIR / f"{document_id}_{file.filename}"
+    raw_path = INPUT_RAW_DIR / f"{document_id}_{safe_filename}"
 
     try:
         content = await file.read()
@@ -103,9 +113,9 @@ async def upload_and_process(
             )
 
         repo = IngestionRepository(connection_string=config.connection_string)
-        await repo.register_document(
+        registered = await repo.register_document(
             doc_id=document_id,
-            file_name=file.filename,
+            file_name=safe_filename,
             raw_storage_path=str(raw_path.resolve()),
             file_size=validation_result.file_size,
             content_type=file.content_type or "application/octet-stream",
@@ -113,25 +123,44 @@ async def upload_and_process(
             chunk_size=chunk_size,
             parse_backend=parse_backend,
             metadata={
-                "filename": file.filename,
+                "filename": safe_filename,
                 "content_type": file.content_type,
                 "file_size": validation_result.file_size,
-                "upload_timestamp": str(uuid.uuid1().time),
+                "upload_timestamp": datetime.now(timezone.utc).isoformat(),
                 "validation_passed": True,
             },
         )
 
-        task_chain = chain(
-            parse_document_task.s(document_id),
-            chunk_document_task.s(document_id),
-            embed_document_task.s(document_id),
-        )
-        async_task = task_chain.apply_async(queue="upload")
+        # file_name is UNIQUE: on a conflict register_document returns the *existing*
+        # row. Dispatching our own id would queue a document that has no status row,
+        # so every stage would skip it and /documents/{id}/status would 404.
+        if registered["id"] != document_id:
+            raw_path.unlink(missing_ok=True)
+            existing_stage = registered.get("stage")
+            logfire.info(
+                "Upload skipped, filename already registered",
+                document_id=registered["id"],
+                filename=safe_filename,
+                stage=existing_stage,
+            )
+            return UploadResponse(
+                status="duplicate",
+                document_id=registered["id"],
+                filename=safe_filename,
+                message=(
+                    f"'{safe_filename}' is already registered (stage: {existing_stage}). "
+                    f"DELETE /documents/{registered['id']} first to re-ingest it."
+                ),
+                chunks_created=registered.get("chunk_count"),
+            )
+
+        task_chain = build_ingestion_chain(document_id, from_stage="registered", queue=UPLOAD_QUEUE)
+        async_task = task_chain.apply_async()
 
         logfire.info(
             "Upload queued for Celery worker",
             document_id=document_id,
-            filename=file.filename,
+            filename=safe_filename,
             task_id=async_task.id,
             table_name=table_name,
         )
@@ -139,8 +168,8 @@ async def upload_and_process(
         return UploadResponse(
             status="queued",
             document_id=document_id,
-            filename=file.filename,
-            message=f"Upload queued for processing. Task {async_task.id}",
+            filename=safe_filename,
+            message="Upload queued for processing. Poll /documents/{id}/status for progress.",
             chunks_created=None,
             task_id=async_task.id,
         )
@@ -148,11 +177,17 @@ async def upload_and_process(
     except HTTPException:
         raise
     except Exception as e:
+        # Nothing downstream owns this file yet, so don't leave it in INPUT_RAW_DIR
+        # where the directory scan would later pick it up.
+        try:
+            raw_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         tb = traceback.format_exc()
         logfire.error(
             "Upload processing failed",
             document_id=document_id,
-            filename=file.filename if file.filename else "unknown",
+            filename=safe_filename,
             error_type=type(e).__name__,
             error=str(e),
             traceback=tb,
@@ -528,6 +563,78 @@ async def get_document_status(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get document status: {type(e).__name__}: {e}"
+        )
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    delete_chunks: bool = True,
+    delete_raw_file: bool = True,
+    x_app_password: Optional[str] = Header(default=None),
+    config=None,
+    get_pipeline=None,
+):
+    """Delete a document from the status DB so it can be re-ingested.
+
+    Removing the `documents` row cascades to its parsed and chunked artifacts.
+    Embedded vectors live in a separate chunk table and the raw file on disk, so
+    both are cleaned up explicitly — otherwise a re-upload would duplicate chunks
+    and the directory scan would re-register the leftover file.
+    """
+    require_access_password(x_app_password)
+    try:
+        repo = IngestionRepository(connection_string=config.connection_string)
+        status = await repo.get_document_status(document_id)
+        if not status:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        chunks_deleted = 0
+        if delete_chunks:
+            table_name = status.get("target_table_name") or DEFAULT_TABLE_NAME
+            validate_table_name(table_name)
+            pipeline = await get_pipeline(table_name)
+            chunks_deleted = await pipeline.delete_document(document_id)
+
+        raw_file_deleted = False
+        if delete_raw_file and status.get("raw_storage_path"):
+            raw_path = Path(status["raw_storage_path"])
+            # Only touch files we own, so a hand-registered path elsewhere on the
+            # filesystem is never removed by this endpoint.
+            try:
+                raw_path.resolve().relative_to(INPUT_RAW_DIR.resolve())
+            except ValueError:
+                logfire.warn(
+                    "Skipping raw file delete outside INPUT_RAW_DIR",
+                    document_id=document_id,
+                    raw_storage_path=str(raw_path),
+                )
+            else:
+                raw_file_deleted = raw_path.exists()
+                raw_path.unlink(missing_ok=True)
+
+        # Cascades to document_parsed / document_chunked.
+        await repo.delete_document(document_id)
+
+        logfire.info(
+            "Document deleted",
+            document_id=document_id,
+            chunks_deleted=chunks_deleted,
+            raw_file_deleted=raw_file_deleted,
+        )
+        return {
+            "status": "deleted",
+            "document_id": document_id,
+            "file_name": status.get("file_name"),
+            "chunks_deleted": chunks_deleted,
+            "raw_file_deleted": raw_file_deleted,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete document: {type(e).__name__}: {e}"
         )
 
 

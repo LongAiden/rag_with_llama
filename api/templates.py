@@ -450,6 +450,42 @@ HOME_PAGE_HTML = """
             notification.classList.remove('show');
         }
 
+        // Ingestion runs asynchronously in a Celery worker, so /upload only returns
+        // "queued". Poll the status DB until the document reaches a terminal stage.
+        async function pollDocumentStatus(documentId, filename) {
+            const POLL_MS = 3000;
+            const deadline = Date.now() + 15 * 60 * 1000;  // VLM PDF parsing is slow
+
+            while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, POLL_MS));
+
+                let status;
+                try {
+                    const res = await fetch(`/documents/${documentId}/status`);
+                    if (!res.ok) { continue; }
+                    status = await res.json();
+                } catch (err) {
+                    continue;  // transient blip, keep polling
+                }
+
+                if (status.stage === 'embedded') {
+                    const n = status.chunk_count || 0;
+                    showNotification(`"${filename}" ingested — ${n} chunks indexed.`, 'success');
+                    return;
+                }
+                if (status.stage === 'failed') {
+                    showNotification(`Ingestion failed for "${filename}": ${status.last_error || 'unknown error'}`, 'error');
+                    return;
+                }
+                showNotification(`Processing "${filename}" — ${status.stage}...`, 'success');
+            }
+
+            showNotification(
+                `"${filename}" is still processing. Check /documents/${documentId}/status.`,
+                'success'
+            );
+        }
+
         // Handle upload form submission with AJAX
         document.querySelector('form[action="/upload"]').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -473,10 +509,13 @@ HOME_PAGE_HTML = """
 
                 const result = await response.json();
 
-                if (response.ok) {
-                    showNotification(`Document "${result.filename}" uploaded and processed successfully! Document ID: ${result.document_id.substring(0,8)}...`, 'success');
+                if (response.ok && result.status === 'duplicate') {
+                    showNotification(result.message, 'error');
+                } else if (response.ok) {
+                    showNotification(`"${result.filename}" queued for processing...`, 'success');
                     this.reset(); // Clear the form
                     hydratePasswordInputs();
+                    pollDocumentStatus(result.document_id, result.filename);
                 } else {
                     showNotification(`Upload failed: ${result.detail}`, 'error');
                 }

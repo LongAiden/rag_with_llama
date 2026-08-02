@@ -73,62 +73,59 @@ class IngestionRepository:
                 )
             return dict(row)
 
-    async def claim_next_document(
+    async def claim_document(
         self,
+        doc_id: str,
         current_stage: str,
         processing_stage: str,
         worker_id: str,
         timeout_minutes: int = 30,
     ) -> Optional[Dict[str, Any]]:
         """
-        Atomically claim the next document in current_stage and move it to
-        processing_stage. Returns None if nothing is available.
+        Atomically claim one specific document and move it to processing_stage.
+
+        Returns None if the document does not exist, is not in current_stage, or is
+        already claimed by a live worker — in which case no row is modified. This is
+        the claim used by the stage tasks, which are always dispatched for a known
+        document id; claiming "whichever row is next" would strand other documents
+        in a processing stage.
         """
         pool = await self._get_pool()
         timeout = timedelta(minutes=timeout_minutes)
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    """
-                    SELECT *
-                    FROM documents
-                    WHERE stage = $1
-                      AND (claimed_at IS NULL OR claimed_at < NOW() - $2::interval)
-                    ORDER BY created_at
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT 1
-                    """,
-                    current_stage,
-                    timeout,
-                )
-                if row is None:
-                    return None
-                await conn.execute(
-                    """
-                    UPDATE documents
-                    SET stage = $1,
-                        claimed_at = NOW(),
-                        claimed_by = $2,
-                        updated_at = NOW()
-                    WHERE id = $3
-                    """,
-                    processing_stage,
-                    worker_id,
-                    row["id"],
-                )
-                result = dict(row)
-                result["stage"] = processing_stage
-                result["claimed_by"] = worker_id
-                return result
+            row = await conn.fetchrow(
+                """
+                UPDATE documents
+                SET stage = $3,
+                    claimed_at = NOW(),
+                    claimed_by = $4,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND stage = $2
+                  AND (claimed_at IS NULL OR claimed_at < NOW() - $5::interval)
+                RETURNING *
+                """,
+                doc_id,
+                current_stage,
+                processing_stage,
+                worker_id,
+                timeout,
+            )
+            return dict(row) if row else None
 
     async def transition_to_parsed(
         self,
         doc_id: str,
         parsed_text: str,
         parser_used: str,
+        file_type: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Store parsed text and mark document as parsed."""
+        """Store parsed text and mark document as parsed.
+
+        `file_type` is persisted on the documents row because the chunking stage
+        branches on it (markdown/page-aware chunking for PDFs).
+        """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -136,6 +133,11 @@ class IngestionRepository:
                     """
                     INSERT INTO document_parsed (document_id, parsed_text, parser_used, metadata)
                     VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (document_id) DO UPDATE SET
+                        parsed_text = EXCLUDED.parsed_text,
+                        parser_used = EXCLUDED.parser_used,
+                        metadata    = EXCLUDED.metadata,
+                        created_at  = NOW()
                     RETURNING id
                     """,
                     doc_id,
@@ -148,14 +150,17 @@ class IngestionRepository:
                     UPDATE documents
                     SET stage = 'parsed',
                         parsed_id = $1,
+                        file_type = COALESCE(NULLIF($3, ''), file_type),
                         claimed_at = NULL,
                         claimed_by = NULL,
+                        error_stage = NULL,
                         updated_at = NOW()
                     WHERE id = $2
                     RETURNING *
                     """,
                     parsed_row["id"],
                     doc_id,
+                    file_type,
                 )
                 return dict(doc_row)
 
@@ -174,6 +179,12 @@ class IngestionRepository:
                     """
                     INSERT INTO document_chunked (document_id, chunks, chunk_size, chunk_count, metadata)
                     VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (document_id) DO UPDATE SET
+                        chunks      = EXCLUDED.chunks,
+                        chunk_size  = EXCLUDED.chunk_size,
+                        chunk_count = EXCLUDED.chunk_count,
+                        metadata    = EXCLUDED.metadata,
+                        created_at  = NOW()
                     RETURNING id
                     """,
                     doc_id,
@@ -190,6 +201,7 @@ class IngestionRepository:
                         chunk_count = $2,
                         claimed_at = NULL,
                         claimed_by = NULL,
+                        error_stage = NULL,
                         updated_at = NOW()
                     WHERE id = $3
                     RETURNING *
@@ -210,6 +222,8 @@ class IngestionRepository:
                 SET stage = 'embedded',
                     claimed_at = NULL,
                     claimed_by = NULL,
+                    error_stage = NULL,
+                    last_error = NULL,
                     updated_at = NOW()
                 WHERE id = $1
                 RETURNING *
@@ -223,8 +237,13 @@ class IngestionRepository:
         doc_id: str,
         error: str,
         max_attempts: int = 2,
+        stage: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record an error and move the document to 'error' or terminal 'failed'."""
+        """Record an error and move the document to 'error' or terminal 'failed'.
+
+        `stage` is the pipeline stage that raised, stored so that a retry can resume
+        from the last completed artifact instead of re-parsing from scratch.
+        """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -232,6 +251,7 @@ class IngestionRepository:
                 UPDATE documents
                 SET attempts = attempts + 1,
                     last_error = $2,
+                    error_stage = COALESCE($4, error_stage),
                     stage = CASE
                         WHEN attempts + 1 >= $3 THEN 'failed'
                         ELSE 'error'
@@ -245,6 +265,7 @@ class IngestionRepository:
                 doc_id,
                 str(error)[:2000],
                 max_attempts,
+                stage,
             )
             return dict(row) if row else {}
 
@@ -273,13 +294,22 @@ class IngestionRepository:
         return _parse_count(result)
 
     async def reset_error_documents(self, max_attempts: int = 2) -> int:
-        """Reset errored documents that still have retry attempts left."""
+        """Reset errored documents that still have retry attempts left.
+
+        Resumes from the last completed artifact rather than always restarting at
+        'registered' — re-parsing a PDF through a VLM backend is the most expensive
+        stage and should not be repeated for an embedding failure.
+        """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
                 UPDATE documents
-                SET stage = 'registered',
+                SET stage = CASE
+                        WHEN error_stage = 'embed' AND chunked_id IS NOT NULL THEN 'chunked'
+                        WHEN error_stage = 'chunk' AND parsed_id IS NOT NULL THEN 'parsed'
+                        ELSE 'registered'
+                    END,
                     claimed_at = NULL,
                     claimed_by = NULL,
                     updated_at = NOW()
@@ -325,6 +355,35 @@ class IngestionRepository:
                 file_name,
             )
             return row is not None
+
+    async def is_path_registered(self, raw_storage_path: str) -> bool:
+        """Check whether a raw file path has already been registered.
+
+        The directory scan must key on the stored path, not the display filename:
+        uploads land on disk as '<uuid>_<name>' but register under '<name>', so a
+        filename check would re-register every uploaded file as a new document.
+        """
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM documents WHERE raw_storage_path = $1",
+                raw_storage_path,
+            )
+            return row is not None
+
+    async def delete_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Delete a document's status row, cascading to its parsed/chunked artifacts.
+
+        Returns the deleted row (so callers can clean up the raw file and vector
+        chunks), or None if it did not exist.
+        """
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "DELETE FROM documents WHERE id = $1 RETURNING *",
+                doc_id,
+            )
+            return dict(row) if row else None
 
     async def get_parsed(self, doc_id: str) -> Optional[Dict[str, Any]]:
         pool = await self._get_pool()

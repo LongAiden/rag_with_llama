@@ -1,7 +1,24 @@
 import asyncio
+import json
 from typing import Optional, Dict
 import asyncpg
 import logfire
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """
+    Register json/jsonb codecs so Python dicts and lists round-trip natively.
+
+    Without this asyncpg maps json/jsonb to `str`, which means passing a dict as
+    a query argument raises DataError and reading a JSONB column returns raw text.
+    """
+    for type_name in ("json", "jsonb"):
+        await conn.set_type_codec(
+            type_name,
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
 
 
 class ConnectionPoolManager:
@@ -36,6 +53,7 @@ class ConnectionPoolManager:
                 connection_string,
                 min_size=min_size,
                 max_size=max_size,
+                init=_init_connection,
             )
             cls._instances[key] = pool
             logfire.info("Connection pool created", min_size=min_size, max_size=max_size)

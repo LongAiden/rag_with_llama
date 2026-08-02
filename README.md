@@ -5,18 +5,21 @@ A Retrieval-Augmented Generation (RAG) system built with FastAPI, PostgreSQL + p
 ## How It Works
 
 ```
-PDF file  →  Parser (choose one)       →  MarkdownChunker  →  pgvector  →  Query + Rerank  →  LLM Answer (choose one)
-input/pdf/   • PyMuPDF (default)          (chonkie)           (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
-             • Docling + Ollama VLM                                                             • DeepSeek-R1 8B    (Ollama /api/generate)
-             • Docling + Gemini Vision                                                          • DeepSeek-R1 1.5B  (Ollama)
-                                                                                                • Llama 3.2 3B      (Ollama)
+Raw file  →  Status DB (documents)  →  Parse  →  Chunk  →  Embed  →  pgvector  →  Query + Rerank  →  LLM Answer (choose one)
+input/raw/   one row per file,           (parser)  (chunker) (vector)  (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
+             stage-based, claim & retry                                                             • DeepSeek-R1 8B    (Ollama /api/generate)
+                                                                                                  • DeepSeek-R1 1.5B  (Ollama)
+                                                                                                  • Llama 3.2 3B      (Ollama)
 ```
 
-1. **Upload a PDF** - choose a parsing backend: fast PyMuPDF (default), Docling + local Ollama VLM (`qwen2.5vl:7b`), or Docling + Gemini Vision. The result is stored as Markdown in `input/markdown/`
-2. **Chunk** - the Markdown is split into chunks using a structure-aware MarkdownChunker
-3. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in pgvector
-4. **Query** - a question triggers vector similarity search + BM25 reranking
-5. **Answer** - top chunks are passed to your chosen LLM: **Gemini 2.5 Flash** (cloud) or **DeepSeek-R1 8B** running locally via Ollama
+1. **Upload / scan** - drop a file via the API or the weekly scan. The raw file is saved in `input/raw/` and a status row is inserted into the `documents` table (`stage = registered`).
+2. **Parse** - a Celery worker claims the row, extracts text using the chosen backend (PyMuPDF, Docling + Ollama VLM, or Docling + Gemini Vision), and stores the parsed text in `document_parsed`.
+3. **Chunk** - the parsed text is split into chunks; the result is stored in `document_chunked`.
+4. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in the existing `chunks` pgvector table.
+5. **Query** - a question triggers vector similarity search + BM25 reranking.
+6. **Answer** - top chunks are passed to your chosen LLM: **Gemini 2.5 Flash** (cloud) or a **DeepSeek-R1 / Llama** model running locally via Ollama.
+
+The status DB is coordinated by three Celery queues: `upload` (single worker for API uploads), `ingestion` (scalable batch workers), and `rag` (existing RAG tasks). A weekly scan registers new files and retries errors; a stale-claim sweep resets tasks stuck longer than `INGESTION_CLAIM_TIMEOUT_MINUTES`.
 
 ---
 
@@ -181,7 +184,7 @@ Upload and process a new document into the database.
    - **Access Password** - required only if `APP_ACCESS_PASSWORD` is set
    - **Table Name** - target table in the database (default: `document_chunks`)
    - **Chunk Size** - token size per chunk (default: 512)
-3. Click **📤 Upload & Process**. Processing runs as a background task via Celery.
+3. Click **📤 Upload & Process**. The file is saved to `input/raw/`, registered in the `documents` status table, and processed in the background by Celery. Track progress via `/documents/{document_id}/status`.
 
 ### Navigation
 
@@ -204,7 +207,10 @@ docker compose down
 | `app` | 8000 | FastAPI application |
 | `postgres` | 5432 | PostgreSQL + pgvector |
 | `redis` | 6379 | Celery broker |
-| `celery_worker` | - | Background task worker |
+| `celery_worker_rag` | - | RAG / extraction tasks |
+| `celery_worker_upload` | - | API upload pipeline (single worker) |
+| `celery_worker_ingestion` | - | Batch ingestion pipeline (scale to 2 workers) |
+| `celery_beat` | - | Celery scheduler (weekly scan, stale sweep) |
 | `langfuse` | 3000 | LLM observability UI *(observability profile only)* |
 | `pgadmin` | 5050 | DB admin UI *(dev profile only)* |
 
@@ -225,7 +231,8 @@ docker compose --profile observability up -d langfuse
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
-| `POST` | `/upload` | Upload and process a document |
+| `POST` | `/upload` | Upload and process a document (returns queued status + document_id) |
+| `GET` | `/documents/{document_id}/status` | Check ingestion status and stage history |
 | `POST` | `/query` | Ask a question, get a RAG answer |
 | `GET` | `/tables` | List all chunk tables |
 | `GET` | `/tables/count` | Count chunk tables in the database |
@@ -240,7 +247,7 @@ docker compose --profile observability up -d langfuse
 **Upload a PDF:**
 ```bash
 curl -X POST "http://127.0.0.1:8000/upload" \
-  -F "file=@input/pdf/llama2.pdf" \
+  -F "file=@input/raw/llama2.pdf" \
   -F "chunk_size=512" \
   -F "table_name=documents"
 ```
@@ -260,8 +267,7 @@ curl -X POST "http://127.0.0.1:8000/query" \
 rag_with_llama/
 │
 ├── input/                        # Runtime I/O
-│   ├── pdf/                      # Drop PDFs here (e.g. llama2.pdf)
-│   └── markdown/                 # Auto-generated Markdown output
+│   └── raw/                      # Original files from API uploads / weekly scan
 │
 ├── ingestion/                    # Document ingestion pipeline
 │   ├── processors/
@@ -300,7 +306,11 @@ rag_with_llama/
 │
 ├── worker/
 │   ├── celery_app.py
-│   └── tasks.py                  # Async upload task
+│   ├── tasks.py                  # Async upload task
+│   └── ingestion_tasks.py        # Stage-based parse / chunk / embed tasks
+│
+├── repositories/
+│   └── ingestion_repository.py   # Status DB read/write operations
 │
 ├── graph_processing/             # Knowledge graph - DISABLED (code preserved)
 │
@@ -312,7 +322,14 @@ rag_with_llama/
 │   ├── 20260619_chunking-strategies.md
 │   ├── 20260619_docker-setup.md
 │   ├── 20260619_project-architecture-summary.md
-│   └── 20260619_testing.md
+│   ├── 20260619_testing.md
+│   ├── 20260626_chunk-context-enrichment.md
+│   └── 20260802_ingestion_workflow.md
+│
+├── migrations/
+│   ├── 001_create_graph_tables.sql
+│   ├── 002_create_llm_interactions.sql
+│   └── 003_create_ingestion_status.sql
 │
 ├── deployment/
 │   ├── Dockerfile                # App image (uses Dockerfile.base)
@@ -342,6 +359,11 @@ Copy `.env.example` to `.env` and set these values:
 | `OLLAMA_MODEL` | No | `deepseek-r1:8b` | Text model for RAG Q&A (runs locally via Ollama) |
 | `OLLAMA_VLM_MODEL` | No | `qwen3.5:9b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
+| `INPUT_RAW_DIR` | No | `input/raw` | Directory for raw uploaded / scanned files |
+| `INGESTION_MAX_ATTEMPTS` | No | `2` | Max retries before marking a document `failed` |
+| `INGESTION_CLAIM_TIMEOUT_MINUTES` | No | `30` | Reset a worker claim after this many minutes |
+| `DEFAULT_CHUNK_SIZE` | No | `512` | Default chunk size for ingestion |
+| `DEFAULT_PARSE_BACKEND` | No | `ollama` | Default parsing backend for the ingestion pipeline |
 | `APP_ACCESS_PASSWORD` | No | *(disabled)* | Password-protect the web UI |
 | `LOGFIRE_WRITE_TOKEN` | No | - | [Logfire](https://logfire.pydantic.dev/) monitoring |
 
@@ -426,7 +448,7 @@ pytest tests/integration -v    # requires running postgres
 
 ```bash
 # Code changes only (fast, ~30 seconds)
-docker compose restart app celery_worker
+docker compose restart app celery_worker_rag celery_worker_upload celery_worker_ingestion celery_beat
 
 # Dependency changes (slower, ~1–2 min)
 docker compose up --build
@@ -503,4 +525,5 @@ docker exec -it rag_redis redis-cli
 
 - [Chunking Strategies](docs/20260619_chunking-strategies.md)
 - [Project Architecture](docs/20260619_project-architecture-summary.md)
+- [Ingestion Workflow](docs/20260802_ingestion_workflow.md)
 - [Testing Guide](docs/20260619_testing.md)

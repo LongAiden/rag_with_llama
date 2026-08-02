@@ -9,11 +9,9 @@ sentence-transformers>=3.0.0  # Required by chonkie >=1.4.0
 huggingface-hub>=0.19.0,<1.0.0  # Pin compatible version
 
 # Vector Database & SQL
-psycopg2-binary>=2.9.0
 pgvector>=0.3.0
 sqlalchemy[asyncio]>=2.0.0
-greenlet>=2.0.0
-asyncpg # Replace pscycop2
+asyncpg
 
 # Document Processing Pipeline
 docling>=2.0.0  # Structured PDF parsing (tables, headings, layout)
@@ -21,7 +19,6 @@ pypdf>=3.17.0
 python-docx>=1.0.0
 docx2txt>=0.8
 tiktoken>=0.5.2
-PyPDF2
 
 # Chunking Strategy
 chonkie>=1.4.0  # Latest stable version (1.4.2) with bug fixes
@@ -40,7 +37,6 @@ networkx>=3.0  # For graph analysis and algorithms
 # Note: pgRouting is a PostgreSQL extension, not a Python package
 
 # Web Interface & API
-streamlit>=1.31.0
 fastapi>=0.104.0
 pydantic>=2.5.0
 pydantic-settings>=2.0.0  # For configuration management
