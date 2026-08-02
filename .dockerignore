@@ -66,6 +66,7 @@ docker-compose*.yml
 
 # Documentation
 docs/
+!docs/images/
 
 # Tests
 tests/

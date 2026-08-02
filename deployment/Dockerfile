@@ -65,6 +65,7 @@ COPY worker/ ./worker/
 COPY config/ ./config/
 COPY migrations/ ./migrations/
 COPY infra/ ./infra/
+COPY docs/images/ ./docs/images/
 
 # Required directories for runtime state
 RUN mkdir -p /app/data /app/logs /app/input/raw

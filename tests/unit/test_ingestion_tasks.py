@@ -76,7 +76,7 @@ def mock_pipeline_cls(parsed_result, chunk_objects):
     cls = MagicMock()
     cls.parse_file = AsyncMock(return_value=parsed_result)
     cls.chunk_parsed_document = MagicMock(return_value=chunk_objects)
-    with patch("ingestion.embedding.vector_store.ChunkEmbeddingPipeline", cls):
+    with patch("ingestion.embedding.pipeline.ChunkEmbeddingPipeline", cls):
         yield cls
 
 

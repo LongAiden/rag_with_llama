@@ -83,7 +83,7 @@ def _get_pipeline(config, table_name: str):
     """
     if table_name not in _PIPELINES:
         from config.app_config import DEFAULT_EMBEDDING_MODEL
-        from ingestion.embedding.vector_store import ChunkEmbeddingPipeline
+        from ingestion.embedding.pipeline import ChunkEmbeddingPipeline
 
         logger.info("Loading embedding pipeline for table %s", table_name)
         _PIPELINES[table_name] = ChunkEmbeddingPipeline(
@@ -171,7 +171,7 @@ async def _parse_document(doc_id: str) -> Dict[str, Any]:
     """Claim a registered document, parse it, and move it to 'parsed'."""
 
     async def work(repo, config, doc):
-        from ingestion.embedding.vector_store import ChunkEmbeddingPipeline
+        from ingestion.embedding.pipeline import ChunkEmbeddingPipeline
 
         parsed = await ChunkEmbeddingPipeline.parse_file(
             doc["raw_storage_path"],
@@ -203,7 +203,7 @@ async def _chunk_document(doc_id: str) -> Dict[str, Any]:
 
     async def work(repo, config, doc):
         from config.app_config import DEFAULT_CHUNKING_SIMILARITY
-        from ingestion.embedding.vector_store import ChunkEmbeddingPipeline
+        from ingestion.embedding.pipeline import ChunkEmbeddingPipeline
 
         parsed = await repo.get_parsed(doc_id)
         if not parsed:

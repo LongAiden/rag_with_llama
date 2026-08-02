@@ -9,7 +9,8 @@ import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from ingestion.embedding.vector_store import VectorStore, Chunk
+from ingestion.embedding.vector_store import VectorStore
+from ingestion.embedding.chunk import Chunk
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ Covers:
 
 Uses FastAPI TestClient with mocked pipeline and config — no real DB required.
 """
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ def _make_app():
     """Build a minimal FastAPI app with only the delete route wired up."""
     from fastapi import FastAPI, Header
     from typing import Optional
-    from api.routes.document_routes import delete_table
+    from api.routes.table_routes import delete_table
 
     app = FastAPI()
 
@@ -26,14 +27,18 @@ def _make_app():
     mock_conn = AsyncMock()
     mock_conn.fetchrow = AsyncMock(return_value={"table_exists": True, "estimated_rows": 5})
     mock_conn.execute = AsyncMock()
-    mock_conn.close = AsyncMock()
 
     mock_vector_store = MagicMock()
     mock_vector_store.table_name = "some_other_table"
 
     mock_pipeline = MagicMock()
     mock_pipeline.vector_store = mock_vector_store
-    mock_pipeline.vector_store._get_connection = AsyncMock(return_value=mock_conn)
+
+    @asynccontextmanager
+    async def mock_connection():
+        yield mock_conn
+
+    mock_pipeline.vector_store.connection = mock_connection
 
     async def mock_get_pipeline(table_name):
         return mock_pipeline

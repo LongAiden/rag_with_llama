@@ -302,23 +302,30 @@ rag_with_llama/
 │   └── app_config.py             # AppConfig, AppSettings, DatabaseConfig
 │
 ├── models/
-│   └── models.py                 # Pydantic request/response models
+│   └── schemas.py                # Pydantic request/response models
 │
 ├── worker/
+│   ├── __init__.py
 │   ├── celery_app.py
 │   ├── tasks.py                  # Async upload task
 │   └── ingestion_tasks.py        # Stage-based parse / chunk / embed tasks
 │
-├── repositories/
-│   └── ingestion_repository.py   # Status DB read/write operations
-│
-├── graph_processing/             # Knowledge graph - DISABLED (code preserved)
+├── infra/
+│   ├── db/                       # Database pool, repositories, identifiers
+│   │   ├── pool.py
+│   │   ├── table_repository.py
+│   │   ├── ingestion_repository.py
+│   │   └── identifiers.py
+│   └── telemetry/                # LLM interaction logger
+│       └── llm_logger.py
 │
 ├── tests/
 │   ├── unit/                     # No DB required
 │   └── integration/              # Requires running postgres
 │
-├── docs/                         # Developer documentation
+├── docs/                         # Developer documentation & images
+│   ├── images/                   # Screenshots and README assets
+│   ├── archive/                  # Historical refactoring notes
 │   ├── 20260619_chunking-strategies.md
 │   ├── 20260619_docker-setup.md
 │   ├── 20260619_project-architecture-summary.md
@@ -327,7 +334,6 @@ rag_with_llama/
 │   └── 20260802_ingestion_workflow.md
 │
 ├── migrations/
-│   ├── 001_create_graph_tables.sql
 │   ├── 002_create_llm_interactions.sql
 │   └── 003_create_ingestion_status.sql
 │
@@ -416,31 +422,31 @@ pytest tests/integration -v    # requires running postgres
 
 **Home screen (idle - no chat session yet):**
 
-<img src="./images/home_screen.png" alt="Home Screen" width="600">
+<img src="./docs/images/home_screen.png" alt="Home Screen" width="600">
 
-<img src="./images/chat_session_idle.png" alt="Chat Tab Idle" width="600">
+<img src="./docs/images/chat_session_idle.png" alt="Chat Tab Idle" width="600">
 
 **Chat session - query + results:**
 
-<img src="./images/chat_session.png" alt="Chat Session with Results" width="600">
+<img src="./docs/images/chat_session.png" alt="Chat Session with Results" width="600">
 
 **Swagger UI (interactive API docs):**
 
-<img src="./images/fastapi.png" alt="FastAPI Swagger UI" width="600">
+<img src="./docs/images/fastapi.png" alt="FastAPI Swagger UI" width="600">
 
 **Health check:**
 
-<img src="./images/system_health_check.png" alt="System Health Check" width="600">
+<img src="./docs/images/system_health_check.png" alt="System Health Check" width="600">
 
 **Database statistics:**
 
-<img src="./images/database_statistic.png" alt="Database Statistics" width="600">
+<img src="./docs/images/database_statistic.png" alt="Database Statistics" width="600">
 
 **Logfire monitoring:**
 
-<img src="./images/logfire_example.png" alt="Logfire" width="600">
+<img src="./docs/images/logfire_example.png" alt="Logfire" width="600">
 
-<img src="./images/llm_request_logs.png" alt="LLM Request Logs" width="600">
+<img src="./docs/images/llm_request_logs.png" alt="LLM Request Logs" width="600">
 
 ---
 

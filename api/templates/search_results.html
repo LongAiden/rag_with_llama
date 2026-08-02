@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}Search Results - pgvector RAG{% endblock %}
+
+{% block css %}
+<style>
+{% raw %}
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    max-width: 900px;
+    margin: 50px auto;
+    padding: 20px;
+    background: #f8f9fa;
+    line-height: 1.6;
+}
+.header {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+.answer {
+    background: white;
+    padding: 25px;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+.answer h2 {
+    margin-top: 0;
+    margin-bottom: 10px;
+}
+.answer p {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    line-height: 1.8;
+    margin: 0;
+}
+.sources {
+    background: #e3f2fd;
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+}
+.source-item {
+    background: white;
+    padding: 15px;
+    margin: 10px 0;
+    border-radius: 8px;
+    border-left: 4px solid #007bff;
+    line-height: 1.8;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+.stats {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 20px;
+    font-size: 14px;
+    color: #666;
+}
+button {
+    background: linear-gradient(135deg, #007bff, #0056b3);
+    color: white;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.2s;
+    text-decoration: none;
+    display: inline-block;
+}
+button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+}
+h1 { color: #2c3e50; margin-bottom: 10px; }
+h2 { color: #34495e; margin-bottom: 15px; }
+.query { font-style: italic; color: #666; }
+{% endraw %}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>🔍 Search Results</h1>
+    <p class="query"><strong>Query:</strong> "{{ query }}"</p>
+    <a href="/"><button>← Back to Search</button></a>
+</div>
+
+<div class="answer">
+    <h2>💡 Answer</h2>
+    <p>{{ answer }}</p>
+    <div class="stats" style="margin-top: 15px; margin-bottom: 0;">
+        🪙 <strong>Tokens:</strong> {{ token_display }}
+    </div>
+</div>
+
+<div class="sources">
+    <h2>📚 Sources ({{ source_count }} found)</h2>
+    {{ sources_html | safe }}
+</div>
+
+<div class="stats">
+    <strong>Search Statistics:</strong><br>
+    • Chunks found: {{ chunks_found }}<br>
+    • Average similarity: {{ avg_similarity }}<br>
+    • Search method: {{ search_method }}<br>
+    • Table used: {{ table_used }}<br>
+    • Threshold: {{ threshold_used }}<br>
+    • Response confidence: {{ confidence }}<br>
+    • Response word count: {{ word_count }}<br>
+    • Graph enriched: {{ graph_enriched }}<br>
+    • Tokens: {{ token_display }}
+</div>
+{% endblock %}

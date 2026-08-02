@@ -45,3 +45,8 @@ htmlcov/
 *.cursorrules
 
 *.claude
+
+# Temporary and backup files
+*.tmp
+*.bak
+.ipynb_checkpoints/

@@ -18,16 +18,16 @@ from fastapi import FastAPI, File, UploadFile, Form, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.config import AppConfig, DEFAULT_TABLE_NAME, DEFAULT_EMBEDDING_MODEL
-from ingestion.embedding.vector_store import ChunkEmbeddingPipeline
-from models.models import QueryRequest, UploadResponse, RAGResponse
+from config.app_config import AppConfig, DEFAULT_TABLE_NAME, DEFAULT_EMBEDDING_MODEL
+from ingestion.embedding import ChunkEmbeddingPipeline
+from models.schemas import QueryRequest, UploadResponse, RAGResponse
 # Global configuration
 config = AppConfig()
 
 
 # Initialize FastAPI application
 app = FastAPI(title="pgvector RAG API", version="1.0.0")
-app.mount("/images", StaticFiles(directory="images"), name="images")
+app.mount("/images", StaticFiles(directory="docs/images"), name="images")
 
 
 async def get_pipeline(table_name: str = DEFAULT_TABLE_NAME):
@@ -55,20 +55,26 @@ import api.routes.observability_routes as _obs_routes
 _obs_routes._connection_string = config.connection_string
 app.include_router(_obs_routes.router)
 
-# Import route handlers from api_routes module
+# Import route handlers from split route modules
 from api.routes.document_routes import (
-    home,
     upload_and_process,
-    query_documents,
-    query_documents_form,
-    get_table_count,
-    list_tables,
-    get_database_stats,
-    health_check,
     get_supported_types,
     get_document_status,
     delete_document,
-    delete_table
+)
+from api.routes.query_routes import (
+    home,
+    query_documents,
+    query_documents_form,
+)
+from api.routes.table_routes import (
+    get_table_count,
+    list_tables,
+    delete_table,
+)
+from api.routes.admin_routes import (
+    get_database_stats,
+    health_check,
 )
 
 

@@ -31,6 +31,7 @@ COPY worker/ ./worker/
 COPY config/ ./config/
 COPY infra/ ./infra/
 COPY migrations/ ./migrations/
+COPY docs/images/ ./docs/images/
 
 # Note: tests/ directory will be mounted as a volume in docker-compose
 # This allows for live test development without rebuilding the image

@@ -21,7 +21,7 @@ except ImportError:
 
 from retrieval.utils import merge_with_rrf
 from retrieval.llm_operations import generate_llm_response
-from models.models import RAGResponse, RAGSource, RAGResponseMetadata
+from models.schemas import RAGResponse, RAGSource, RAGResponseMetadata
 from infra.telemetry import InteractionPayload, log_interaction
 
 

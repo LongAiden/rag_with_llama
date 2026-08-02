@@ -1,5 +1,5 @@
 """
-Unit tests for models/models.py.
+Unit tests for models/schemas.py.
 
 Covers:
 - QueryRequest validation (field constraints)
@@ -12,7 +12,7 @@ Covers:
 import pytest
 from pydantic import ValidationError
 
-from models.models import (
+from models.schemas import (
     QueryRequest,
     UploadResponse,
     SupportedFileType,

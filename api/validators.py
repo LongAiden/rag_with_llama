@@ -7,7 +7,7 @@ import os
 from typing import Optional
 from fastapi import HTTPException
 
-from api.config import ALLOWED_CONTENT_TYPES
+from config.app_config import ALLOWED_CONTENT_TYPES
 from infra.db.identifiers import validate_table_name as _validate_table_name
 
 
