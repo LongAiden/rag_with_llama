@@ -1,57 +1,12 @@
 """
 Utility functions for the RAG application.
-Includes BM25 reranking and other helper functions.
+Rank fusion (RRF) and lazy reranker construction.
 """
 
-import os
-import numpy as np
+import threading
 from typing import List, Dict
-from rank_bm25 import BM25Okapi
 
 from retrieval.reranking import Reranker
-
-
-def rerank_bm25(query: str, sources: List[Dict], top_k: int) -> List[Dict]:
-    """
-    Use BM25 to return top k sources from the inputs.
-
-    Args:
-        query: Search query string
-        sources: List of sources from PostgreSQL
-            Format: {
-                'chunk_id': '6250bf1e-e76e-4bb9-b33b-d05eb07aa77c',
-                'text': 'abc',
-                'metadata': {},
-                ...
-            }
-        top_k: Number of top results to return
-
-    Returns:
-        List of top k sources with BM25 scores added
-    """
-    # Tokenize the text (simple word splitting)
-    tokenized_corpus = [doc['text'].lower().split() for doc in sources]
-
-    # Create BM25 index
-    bm25 = BM25Okapi(tokenized_corpus)
-
-    # Search with BM25
-    tokenized_query = query.lower().split()
-
-    # Get BM25 scores for all documents
-    bm25_scores = bm25.get_scores(tokenized_query)
-
-    # Get top k results
-    top_indices = np.argsort(bm25_scores)[::-1][:top_k]
-
-    # Retrieve top documents
-    bm25_results = []
-    for idx in top_indices:
-        result = sources[idx].copy()
-        result['bm25_score'] = float(bm25_scores[idx])
-        bm25_results.append(result)
-
-    return bm25_results
 
 
 def merge_with_rrf(
@@ -96,9 +51,15 @@ def merge_with_rrf(
     return merged
 
 
+_RERANKER_LOCK = threading.Lock()
+
+
 def get_reranker(config) -> Reranker:
     """
     Get or initialize the reranker (lazy initialization).
+
+    Loading a CrossEncoder takes seconds, so callers run this in a worker thread.
+    The lock keeps two concurrent first-calls from each loading their own copy.
 
     Args:
         config: Application configuration object
@@ -106,9 +67,14 @@ def get_reranker(config) -> Reranker:
     Returns:
         Reranker instance
     """
-    if config.reranker is None:
-        # Get model from environment or use default
-        rerank_model = os.getenv('RERANK_MODEL', 'cross-encoder/ms-marco-MiniLM-L-6-v2')
-        config.reranker = Reranker(model_name=rerank_model)
-        print(f"✓ Reranker initialized with model: {rerank_model}")
+    if config.reranker is not None:
+        return config.reranker
+
+    with _RERANKER_LOCK:
+        if config.reranker is None:
+            # From AppSettings, not os.getenv: pydantic-settings also reads .env,
+            # which a bare os.getenv would silently ignore.
+            rerank_model = config.settings.rerank_model
+            config.reranker = Reranker(model_name=rerank_model)
+            print(f"✓ Reranker initialized with model: {rerank_model}")
     return config.reranker

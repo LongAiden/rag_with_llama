@@ -3,21 +3,21 @@ import uuid
 from typing import Optional
 
 import logfire
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
 
+from api.dependencies import get_config, get_forget_pipeline, get_pipeline_factory
 from api.validators import require_access_password, validate_table_name
 from config.app_config import DEFAULT_TABLE_NAME
-from infra.db import TableRepository
+from infra.db import IngestionRepository, TableRepository
 
 router = APIRouter()
 
 
 @router.get("/tables/count")
-async def get_table_count(get_pipeline=None, pipeline=None):
+async def get_table_count(get_pipeline=Depends(get_pipeline_factory)):
     """Return the number of chunk tables in the database."""
     try:
-        if pipeline is None:
-            pipeline = await get_pipeline()
+        pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
         async with pipeline.vector_store.connection() as conn:
             repo = TableRepository(conn)
             table_names = await repo.list_chunk_tables()
@@ -27,7 +27,7 @@ async def get_table_count(get_pipeline=None, pipeline=None):
 
 
 @router.get("/tables")
-async def list_tables(get_pipeline=None):
+async def list_tables(get_pipeline=Depends(get_pipeline_factory)):
     """List all chunk tables in the database with row counts."""
     try:
         pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
@@ -53,8 +53,9 @@ async def list_tables(get_pipeline=None):
 async def delete_table(
     table_name: str,
     x_app_password: Optional[str] = Header(default=None),
-    config=None,
-    get_pipeline=None,
+    config=Depends(get_config),
+    get_pipeline=Depends(get_pipeline_factory),
+    forget_pipeline=Depends(get_forget_pipeline),
 ):
     """Delete a specific table from the database (optimized for speed)."""
     require_access_password(x_app_password)
@@ -83,41 +84,50 @@ async def delete_table(
                         detail=f"Table '{table_name}' does not exist",
                     )
 
-                with logfire.span("table_data_deletion"):
-                    await repo.truncate_table(table_name)
+                # DROP removes the data too — TRUNCATE first only buys an extra
+                # exclusive lock.
+                with logfire.span("table_schema_deletion"):
+                    await repo.drop_table(table_name)
                     logfire.info(
-                        "Table data truncated successfully",
+                        "Table dropped successfully",
                         table_name=table_name,
                         rows_deleted=row_count,
                     )
 
-                with logfire.span("table_schema_deletion"):
-                    await repo.drop_table(table_name)
-                    logfire.info(
-                        "Table schema dropped successfully",
-                        table_name=table_name,
-                    )
-
-                if table_name == pipeline_instance.vector_store.table_name:
-                    config.pipeline = None
-                    logfire.info(
-                        "Pipeline reset due to current table deletion",
-                        table_name=table_name,
-                    )
-
+            # Drop the ingestion status rows that pointed at this table. Leaving them
+            # behind strands every document at stage='embedded' against a table that
+            # no longer exists, and the (file_name, target_table_name) unique key then
+            # rejects re-uploads as duplicates.
+            with logfire.span("ingestion_status_cleanup"):
+                ingestion_repo = IngestionRepository(connection_string=config.connection_string)
+                removed = await ingestion_repo.delete_documents_for_table(table_name)
                 logfire.info(
-                    "Table deletion completed successfully",
+                    "Ingestion status rows removed",
                     table_name=table_name,
-                    estimated_rows_deleted=row_count,
+                    documents_removed=len(removed),
                 )
 
-                return {
-                    "status": "success",
-                    "message": f"Table '{table_name}' deleted successfully",
-                    "table_name": table_name,
-                    "estimated_rows_deleted": row_count,
-                    "timestamp": str(uuid.uuid1().time),
-                }
+            if forget_pipeline is not None:
+                forget_pipeline(table_name)
+            elif table_name == pipeline_instance.vector_store.table_name:
+                config.pipeline = None
+            logfire.info("Pipeline cache evicted", table_name=table_name)
+
+            logfire.info(
+                "Table deletion completed successfully",
+                table_name=table_name,
+                estimated_rows_deleted=row_count,
+                documents_removed=len(removed),
+            )
+
+            return {
+                "status": "success",
+                "message": f"Table '{table_name}' deleted successfully",
+                "table_name": table_name,
+                "estimated_rows_deleted": row_count,
+                "documents_removed": len(removed),
+                "timestamp": str(uuid.uuid1().time),
+            }
 
         except HTTPException:
             raise

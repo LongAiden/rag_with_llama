@@ -44,7 +44,12 @@ class IngestionRepository:
         parse_backend: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Register a new document or return the existing row by filename (POC dedupe)."""
+        """Register a new document. Always creates a new row.
+
+        There is no filename de-duplication: re-uploading a file produces a second
+        independent document with its own id. See
+        migrations/005_drop_filename_dedupe.sql.
+        """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -53,7 +58,6 @@ class IngestionRepository:
                     id, file_name, raw_storage_path, file_size, content_type,
                     target_table_name, chunk_size, parse_backend, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (file_name) DO NOTHING
                 RETURNING *
                 """,
                 doc_id,
@@ -66,11 +70,6 @@ class IngestionRepository:
                 parse_backend,
                 metadata or {},
             )
-            if row is None:
-                row = await conn.fetchrow(
-                    "SELECT * FROM documents WHERE file_name = $1",
-                    file_name,
-                )
             return dict(row)
 
     async def claim_document(
@@ -346,15 +345,23 @@ class IngestionRepository:
             )
             return dict(row) if row else None
 
-    async def is_file_registered(self, file_name: str) -> bool:
-        """Check whether a filename has already been registered."""
+    async def delete_documents_for_table(self, target_table_name: str) -> List[Dict[str, Any]]:
+        """Delete every documents row targeting a chunk table, returning the rows.
+
+        Called when that chunk table is dropped. Without this the status rows survive
+        at stage='embedded' pointing at a table that no longer exists, and the unique
+        key on (file_name, target_table_name) then rejects any re-upload as a
+        duplicate — the file becomes permanently un-ingestable.
+
+        The artifact tables clean themselves up via ON DELETE CASCADE.
+        """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM documents WHERE file_name = $1",
-                file_name,
+            rows = await conn.fetch(
+                "DELETE FROM documents WHERE target_table_name = $1 RETURNING *",
+                target_table_name,
             )
-            return row is not None
+            return [dict(r) for r in rows]
 
     async def is_path_registered(self, raw_storage_path: str) -> bool:
         """Check whether a raw file path has already been registered.

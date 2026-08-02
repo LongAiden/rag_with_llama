@@ -2,7 +2,8 @@
 API layer - FastAPI application and routes.
 """
 
-from .app import app, get_pipeline
+from .app import app
+from .dependencies import get_pipeline
 
 __all__ = [
     'app',

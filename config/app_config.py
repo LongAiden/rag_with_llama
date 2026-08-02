@@ -63,8 +63,9 @@ class AppSettings(BaseSettings):
     # Logfire
     logfire_write_token: Optional[str] = Field(default=None, validation_alias='LOGFIRE_WRITE_TOKEN')
 
-    # Ollama
-    ollama_base_url: str = Field(default='http://localhost:11434', validation_alias='OLLAMA_BASE_URL')
+    # Ollama. Default matches docker-compose.yml and .env.example — the app runs in a
+    # container, so 'localhost' would point at the container itself.
+    ollama_base_url: str = Field(default='http://host.docker.internal:11434', validation_alias='OLLAMA_BASE_URL')
     ollama_model: str = Field(default='deepseek-r1:1.5b', validation_alias='OLLAMA_MODEL')
     ollama_vlm_model: str = Field(default='qwen3.5:4b', validation_alias='OLLAMA_VLM_MODEL')
 
@@ -77,9 +78,14 @@ class AppSettings(BaseSettings):
 
     # Embedding
     embedding_model: str = Field(default=DEFAULT_EMBEDDING_MODEL)
+    rerank_model: str = Field(default='cross-encoder/ms-marco-MiniLM-L-6-v2', validation_alias='RERANK_MODEL')
 
     # Table
-    table_name: str = Field(default=DEFAULT_TABLE_NAME)
+    table_name: str = Field(default=DEFAULT_TABLE_NAME, validation_alias='DEFAULT_TABLE_NAME')
+
+    # Celery queues
+    celery_upload_queue: str = Field(default='upload', validation_alias='CELERY_UPLOAD_QUEUE')
+    celery_ingestion_queue: str = Field(default='ingestion', validation_alias='CELERY_INGESTION_QUEUE')
 
     # Ingestion pipeline settings
     input_raw_dir: str = Field(default='input/raw', validation_alias='INPUT_RAW_DIR')
@@ -115,7 +121,6 @@ class AppConfig:
         self.file_validator = FileValidator(FileValidationConfig())
         self.pipeline = None  # Lazy initialization
         self.reranker = None  # Lazy initialization
-        self.graph_pool = None  # Lazy initialization
 
     @property
     def connection_string(self) -> str:

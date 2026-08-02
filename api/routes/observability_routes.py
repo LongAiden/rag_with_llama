@@ -4,34 +4,55 @@ Provides query history, aggregate stats, and time-series metrics
 from the llm_interactions table.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
+
+from infra.db.pool import ConnectionPoolManager
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 
-# Connection string injected at registration time via dependency override
+# Connection string injected at registration time by set_connection_string().
 _connection_string: str = ""
+
+
+def set_connection_string(connection_string: str) -> None:
+    """Wire this router to a database. Called once during app startup."""
+    global _connection_string
+    _connection_string = connection_string
 
 
 def get_connection_string() -> str:
     return _connection_string
 
 
-async def _connect() -> asyncpg.Connection:
+@asynccontextmanager
+async def _connection():
+    """Borrow a pooled connection.
+
+    Uses the shared ConnectionPoolManager rather than asyncpg.connect() so these
+    endpoints do not open a new TCP/TLS/auth handshake per request.
+    """
     try:
-        return await asyncpg.connect(get_connection_string())
+        pool = await ConnectionPoolManager.get_pool(get_connection_string())
+        conn = await pool.acquire()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+
+    try:
+        yield conn
+    finally:
+        await pool.release(conn)
 
 
 @router.get("/stats")
 async def get_stats(days: int = Query(default=7, ge=1, le=365)) -> Dict[str, Any]:
     """Aggregate stats grouped by model and backend for the last N days."""
-    conn = await _connect()
-    try:
+    async with _connection() as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -56,8 +77,6 @@ async def get_stats(days: int = Query(default=7, ge=1, le=365)) -> Dict[str, Any
             "period_days": days,
             "groups": [dict(r) for r in rows],
         }
-    finally:
-        await conn.close()
 
 
 @router.get("/history")
@@ -70,8 +89,7 @@ async def get_history(
     until: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Paginated interaction log with optional filters."""
-    conn = await _connect()
-    try:
+    async with _connection() as conn:
         offset = (page - 1) * page_size
         total = await conn.fetchval(
             """
@@ -104,8 +122,6 @@ async def get_history(
             "page_size": page_size,
             "items": [dict(r) for r in rows],
         }
-    finally:
-        await conn.close()
 
 
 @router.get("/metrics")
@@ -119,8 +135,7 @@ async def get_metrics(
         hour=0, minute=0, second=0, microsecond=0
     )
     until = until or datetime.now(timezone.utc)
-    conn = await _connect()
-    try:
+    async with _connection() as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -142,5 +157,3 @@ async def get_metrics(
             "until": until.isoformat(),
             "data": [dict(r) for r in rows],
         }
-    finally:
-        await conn.close()

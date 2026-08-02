@@ -1,9 +1,11 @@
 """Complete pipeline for chunking documents and storing embeddings."""
 
+import asyncio
 import os
 import re
 import traceback
 import uuid
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,33 +22,48 @@ from ingestion.text_cleaning.cleaners import TextCleaningPipeline
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def _extract_section_hierarchy(markdown: str, position: int) -> str:
-    """
-    Extract the heading hierarchy (H1 > H2 > H3) at a given character position.
+class _MarkdownStructure:
+    """Page-marker and heading positions for a document, scanned once.
 
-    Returns a prefix like "[Chapter 1].[Section 2].[Subsection A]"
-    or empty string if no headings precede the position.
+    Resolving these per chunk the direct way — slicing markdown[:start_index] and
+    re-running both regexes over the prefix — is quadratic in document length. One
+    forward pass plus a binary search per chunk is linear.
     """
-    segment = markdown[:position]
-    heading_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
 
-    hierarchy: Dict[int, str] = {}
-    for match in heading_pattern.finditer(segment):
-        level = len(match.group(1))
-        title = match.group(2).strip()
-        # Remove inline markdown from heading titles (bold, italic, backticks)
-        title = re.sub(r'[*_`]', '', title).strip()
-        hierarchy[level] = title
-        # Clear any deeper levels — they're no longer in scope
-        for deeper in list(hierarchy.keys()):
-            if deeper > level:
+    def __init__(self, markdown: str):
+        self.page_positions: List[int] = []
+        self.page_numbers: List[int] = []
+        for match in re.finditer(r'\[Page (\d+)\]', markdown):
+            # Keyed on the end of the marker: a page starts where its marker
+            # finishes, which is also what _extract_page_content slices from.
+            self.page_positions.append(match.end())
+            self.page_numbers.append(int(match.group(1)))
+
+        self.section_positions: List[int] = []
+        self.section_prefixes: List[str] = []
+        hierarchy: Dict[int, str] = {}
+        for match in re.finditer(r'^(#{1,6})\s+(.+)$', markdown, re.MULTILINE):
+            level = len(match.group(1))
+            # Remove inline markdown from heading titles (bold, italic, backticks)
+            title = re.sub(r'[*_`]', '', match.group(2).strip()).strip()
+            hierarchy[level] = title
+            # Clear any deeper levels — they're no longer in scope
+            for deeper in [lvl for lvl in hierarchy if lvl > level]:
                 del hierarchy[deeper]
+            self.section_positions.append(match.end())
+            self.section_prefixes.append(
+                "[" + "].[".join(hierarchy[lvl] for lvl in sorted(hierarchy)) + "]"
+            )
 
-    if not hierarchy:
-        return ""
+    def page_at(self, position: int) -> int:
+        """Page number in effect at a character offset (1 if none precedes it)."""
+        idx = bisect_right(self.page_positions, position)
+        return self.page_numbers[idx - 1] if idx else 1
 
-    parts = [hierarchy[lvl] for lvl in sorted(hierarchy.keys())]
-    return "[" + "].[".join(parts) + "]"
+    def section_at(self, position: int) -> str:
+        """Heading hierarchy prefix in effect at a character offset."""
+        idx = bisect_right(self.section_positions, position)
+        return self.section_prefixes[idx - 1] if idx else ""
 
 
 def _extract_page_content(markdown: str, page_number: int) -> str:
@@ -171,15 +188,16 @@ class ChunkEmbeddingPipeline:
                 similarity_threshold=similarity_threshold,
             )
 
+            # Scanned once for the whole document, then queried per chunk.
+            structure = _MarkdownStructure(parsed_text)
+
             page_content_cache: Dict[int, str] = {}
             last_section_prefix = ""
             for chunk in chunks:
                 if hasattr(chunk, 'start_index') and chunk.start_index is not None:
-                    segment = parsed_text[:chunk.start_index]
-                    page_matches = list(re.finditer(r'\[Page (\d+)\]', segment))
-                    chunk.page_number = int(page_matches[-1].group(1)) if page_matches else 1
+                    chunk.page_number = structure.page_at(chunk.start_index)
 
-                    section_prefix = _extract_section_hierarchy(parsed_text, chunk.start_index)
+                    section_prefix = structure.section_at(chunk.start_index)
                     if not section_prefix:
                         section_prefix = last_section_prefix
                     else:
@@ -278,7 +296,10 @@ class ChunkEmbeddingPipeline:
         logfire.info("Stage: generating embeddings", num_chunks=len(chunk_texts))
         print("Generating embeddings...")
         try:
-            embeddings = self.embedding_generator.embed_batch(chunk_texts)
+            # Model inference is CPU/GPU-bound and synchronous — off the event loop.
+            embeddings = await asyncio.to_thread(
+                self.embedding_generator.embed_batch, chunk_texts
+            )
         except Exception as e:
             tb = traceback.format_exc()
             logfire.error("Stage FAILED: embedding generation",
@@ -306,8 +327,11 @@ class ChunkEmbeddingPipeline:
                 'end_index': getattr(chunk, 'end_index', None),
                 'page_number': page_number,
                 'section_path': getattr(chunk, 'section_path', ''),
+                # Stored once. This used to be written twice (as 'page_content' and
+                # 'full_content'), so a page split into N chunks kept 2N copies of its
+                # own text in JSONB — and both rode along in every API response.
+                # Only 'page_content' is ever read (retrieval/search.py).
                 'page_content': raw_page_content,
-                'full_content': raw_page_content,
                 'chunk_size': chunk_size,
                 'similarity_threshold': similarity_threshold,
                 'embedding_model': self.embedding_generator.model_name,
@@ -413,7 +437,9 @@ class ChunkEmbeddingPipeline:
         Returns:
             List of relevant chunks
         """
-        query_embedding = self.embedding_generator.embed_text(query)
+        query_embedding = await asyncio.to_thread(
+            self.embedding_generator.embed_text, query
+        )
         return await self.vector_store.search_similar_chunks(
             query_embedding, limit, threshold, document_ids
         )

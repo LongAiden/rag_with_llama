@@ -1,5 +1,4 @@
 """API routes for document upload, status, and deletion."""
-import os
 import uuid
 import traceback
 from datetime import datetime, timezone
@@ -7,15 +6,17 @@ from pathlib import Path
 from typing import Optional
 
 import logfire
-from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Header
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Form, Header
 
+from api.dependencies import get_config, get_pipeline_factory
 from api.validators import validate_upload_params, require_access_password, validate_table_name
-from config.app_config import DEFAULT_TABLE_NAME, DEFAULT_CHUNKING_SIMILARITY
+from config.app_config import AppSettings, DEFAULT_TABLE_NAME
 from infra.db import IngestionRepository
 from models.schemas import UploadResponse
 from worker.ingestion_tasks import UPLOAD_QUEUE, build_ingestion_chain
 
-INPUT_RAW_DIR = Path(os.getenv("INPUT_RAW_DIR", "input/raw"))
+# Via AppSettings so this agrees with the worker and honours .env.
+INPUT_RAW_DIR = Path(AppSettings().input_raw_dir)
 
 router = APIRouter()
 
@@ -28,8 +29,7 @@ async def upload_and_process(
     parse_backend: str = Form(""),
     access_password: Optional[str] = Form(None),
     x_app_password: Optional[str] = Header(default=None),
-    config=None,
-    get_pipeline=None,
+    config=Depends(get_config),
 ):
     """Upload a document, persist the raw file, and queue it for processing."""
     require_access_password(access_password or x_app_password)
@@ -37,6 +37,7 @@ async def upload_and_process(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
+    table_name = (table_name or "").strip() or DEFAULT_TABLE_NAME
     validate_upload_params(chunk_size, file.content_type)
     validate_table_name(table_name)
 
@@ -65,7 +66,9 @@ async def upload_and_process(
             )
 
         repo = IngestionRepository(connection_string=config.connection_string)
-        registered = await repo.register_document(
+        # Always registers a new document — re-uploading the same filename creates a
+        # second independent document rather than being rejected as a duplicate.
+        await repo.register_document(
             doc_id=document_id,
             file_name=safe_filename,
             raw_storage_path=str(raw_path.resolve()),
@@ -82,26 +85,6 @@ async def upload_and_process(
                 "validation_passed": True,
             },
         )
-
-        if registered["id"] != document_id:
-            raw_path.unlink(missing_ok=True)
-            existing_stage = registered.get("stage")
-            logfire.info(
-                "Upload skipped, filename already registered",
-                document_id=registered["id"],
-                filename=safe_filename,
-                stage=existing_stage,
-            )
-            return UploadResponse(
-                status="duplicate",
-                document_id=registered["id"],
-                filename=safe_filename,
-                message=(
-                    f"'{safe_filename}' is already registered (stage: {existing_stage}). "
-                    f"DELETE /documents/{registered['id']} first to re-ingest it."
-                ),
-                chunks_created=registered.get("chunk_count"),
-            )
 
         task_chain = build_ingestion_chain(document_id, from_stage="registered", queue=UPLOAD_QUEUE)
         async_task = task_chain.apply_async()
@@ -149,7 +132,7 @@ async def upload_and_process(
 @router.get("/documents/{document_id}/status")
 async def get_document_status(
     document_id: str,
-    config=None,
+    config=Depends(get_config),
 ):
     """Return the ingestion status of a document from the status DB."""
     try:
@@ -182,8 +165,8 @@ async def delete_document(
     delete_chunks: bool = True,
     delete_raw_file: bool = True,
     x_app_password: Optional[str] = Header(default=None),
-    config=None,
-    get_pipeline=None,
+    config=Depends(get_config),
+    get_pipeline=Depends(get_pipeline_factory),
 ):
     """Delete a document from the status DB so it can be re-ingested."""
     require_access_password(x_app_password)
@@ -240,7 +223,7 @@ async def delete_document(
 
 
 @router.get("/supported-types")
-async def get_supported_types(config=None):
+async def get_supported_types(config=Depends(get_config)):
     """Get information about supported file types and validation config."""
     from ingestion.processors.page_utils import get_supported_file_types, list_available_processors
 

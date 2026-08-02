@@ -3,6 +3,7 @@ LLM operations for the RAG application.
 Handles LLM-based response generation with fallback mechanisms.
 """
 
+import asyncio
 import os
 import logfire
 try:
@@ -24,9 +25,12 @@ class OllamaBackend:
     def __init__(self, model: str):
         self.model = model
 
-    async def generate(self, query: str, context: str, results: list, _agent=None) -> SimpleRAGResponse:
+    async def generate(self, query: str, context: str, results: list) -> SimpleRAGResponse:
         import httpx
-        ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
+        from config.app_config import AppSettings
+
+        # Single source of truth: AppSettings also reads .env, which os.environ does not.
+        ollama_base_url = AppSettings().ollama_base_url.rstrip("/")
         prompt = OLLAMA_RAG_PROMPT_TEMPLATE.format(context=context, query=query)
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -57,9 +61,8 @@ class OllamaBackend:
 class GeminiBackend:
     def __init__(self, model: str):
         self.model = model
-        self._agent = None  # lazy init
 
-    async def generate(self, query: str, context: str, results: list, _agent=None) -> SimpleRAGResponse:
+    async def generate(self, query: str, context: str, results: list) -> SimpleRAGResponse:
         import google.generativeai as genai
 
         sources_used = len(results)
@@ -91,7 +94,10 @@ Answer:"""
 
         try:
             model = genai.GenerativeModel(self.model)
-            response = model.generate_content(prompt)
+            # generate_content is synchronous and blocks for the full LLM latency.
+            # Called directly it would stall the event loop and serialise every
+            # concurrent request behind this one.
+            response = await asyncio.to_thread(model.generate_content, prompt)
             answer = response.text
 
             usage = response.usage_metadata
@@ -129,7 +135,6 @@ async def generate_llm_response(
     query: str,
     context: str,
     results: list,
-    agent,
     model: str = "gemini-2.5-flash",
 ) -> SimpleRAGResponse:
     """Clean implementation — no Langfuse decorator here to avoid serializing heavy objects."""
@@ -150,7 +155,7 @@ async def _traced_generate(
     """
     backend = _get_backend(model)
     logfire.info("LLM request", model=model, backend=type(backend).__name__, results_count=len(results))
-    response = await backend.generate(query, context, results, None)
+    response = await backend.generate(query, context, results)
 
     # Report usage to Langfuse with explicit input/output/total breakdown
     # Langfuse expects: {"input": int, "output": int, "total": int, "unit": "TOKENS"}

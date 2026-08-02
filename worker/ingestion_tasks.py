@@ -27,17 +27,23 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from celery import chain
 
+from config.app_config import AppSettings
 from worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-INPUT_RAW_DIR = Path(os.getenv("INPUT_RAW_DIR", "input/raw"))
-CLAIM_TIMEOUT_MINUTES = int(os.getenv("INGESTION_CLAIM_TIMEOUT_MINUTES", "30"))
-MAX_ATTEMPTS = int(os.getenv("INGESTION_MAX_ATTEMPTS", "2"))
-DEFAULT_CHUNK_SIZE = int(os.getenv("DEFAULT_CHUNK_SIZE", "512"))
+# Read through AppSettings rather than os.getenv: pydantic-settings also reads .env,
+# so a value set only there would otherwise apply to the API and be silently ignored
+# by this module.
+_SETTINGS = AppSettings()
 
-UPLOAD_QUEUE = os.getenv("CELERY_UPLOAD_QUEUE", "upload")
-INGESTION_QUEUE = os.getenv("CELERY_INGESTION_QUEUE", "ingestion")
+INPUT_RAW_DIR = Path(_SETTINGS.input_raw_dir)
+CLAIM_TIMEOUT_MINUTES = _SETTINGS.ingestion_claim_timeout_minutes
+MAX_ATTEMPTS = _SETTINGS.ingestion_max_attempts
+DEFAULT_CHUNK_SIZE = _SETTINGS.default_chunk_size
+
+UPLOAD_QUEUE = _SETTINGS.celery_upload_queue
+INGESTION_QUEUE = _SETTINGS.celery_ingestion_queue
 
 # Stage a document must be in before a given task may claim it, and the
 # in-progress stage it is moved to while that task runs.
@@ -308,16 +314,17 @@ async def _scan_input_dir(repo) -> int:
     INPUT_RAW_DIR.mkdir(parents=True, exist_ok=True)
     registered = 0
 
+    target_table = _SETTINGS.table_name
+
     for entry in sorted(INPUT_RAW_DIR.iterdir()):
         if not entry.is_file() or entry.name.startswith("."):
             continue
 
         raw_path = str(entry.resolve())
-        # Key on the stored path: uploads are written as '<uuid>_<name>' but
-        # registered under '<name>', so a filename check re-registers them.
+        # Keyed on the stored path, not the filename. This is not content
+        # de-duplication (uploads are never deduped) — it only stops the sweep from
+        # re-registering the same file on disk every time it runs.
         if await repo.is_path_registered(raw_path):
-            continue
-        if await repo.is_file_registered(entry.name):
             continue
 
         await repo.register_document(
@@ -326,9 +333,9 @@ async def _scan_input_dir(repo) -> int:
             raw_storage_path=raw_path,
             file_size=entry.stat().st_size,
             content_type=mimetypes.guess_type(raw_path)[0],
-            target_table_name=os.getenv("DEFAULT_TABLE_NAME", "document_chunks"),
+            target_table_name=target_table,
             chunk_size=DEFAULT_CHUNK_SIZE,
-            parse_backend=os.getenv("DEFAULT_PARSE_BACKEND", ""),
+            parse_backend=_SETTINGS.default_parse_backend,
             metadata={"source": "directory_scan"},
         )
         registered += 1

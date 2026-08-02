@@ -1,11 +1,12 @@
 """API routes for the chat UI and RAG queries."""
 from typing import Optional, List
 
-from fastapi import APIRouter, Form, Header, HTTPException
+from fastapi import APIRouter, Depends, Form, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
+from api.dependencies import get_config, get_pipeline_factory
 from api.renderer import render
-from api.validators import require_access_password
+from api.validators import require_access_password, validate_table_name
 from config.app_config import DEFAULT_TABLE_NAME
 from models.schemas import QueryRequest, RAGResponse
 from retrieval.search import perform_document_search
@@ -70,14 +71,16 @@ async def home():
 async def query_documents(
     request: QueryRequest,
     x_app_password: Optional[str] = Header(default=None),
-    config=None,
-    get_pipeline=None,
+    config=Depends(get_config),
+    get_pipeline=Depends(get_pipeline_factory),
 ):
     """Query documents using pgvector similarity search + LLM generation."""
     require_access_password(x_app_password)
+    table_name = (request.table_name or DEFAULT_TABLE_NAME).strip()
+    # Validate before get_pipeline: an invalid name is a 400, and rejecting it here
+    # avoids building a pipeline (which loads an embedding model) just to fail.
+    validate_table_name(table_name)
     try:
-        table_name = (request.table_name or DEFAULT_TABLE_NAME).strip()
-
         @observe(name="rag_query")
         async def _run_search(query: str):
             langfuse_context.update_current_trace(
@@ -112,11 +115,13 @@ async def query_documents_form(
     table_name: str = Form(DEFAULT_TABLE_NAME),
     model: str = Form("gemini-2.5-flash"),
     access_password: Optional[str] = Form(None),
-    config=None,
-    get_pipeline=None,
+    config=Depends(get_config),
+    get_pipeline=Depends(get_pipeline_factory),
 ):
     """Query documents using form data (for HTML form submission)."""
     require_access_password(access_password)
+    table_name = (table_name or DEFAULT_TABLE_NAME).strip()
+    validate_table_name(table_name)
     try:
         @observe(name="rag_query")
         async def _run_search(query: str):
@@ -136,13 +141,19 @@ async def query_documents_form(
 
         result = await _run_search(query)
 
-        sources_html = ''.join([f"""
-        <div class="source-item">
-            <strong>Source {i+1}</strong> (Similarity: {source.similarity:.1%}{f", BM25: {source.bm25_score:.3f}" if source.bm25_score else ""}{f", RRF: {source.rrf_score:.3f}" if source.rrf_score else ""}{f", Rerank: {source.rerank_score:.3f}" if source.rerank_score is not None else ""})<br>
-            <em>Document: {source.document_id[:8]}... | Page: {source.page_number or 'N/A'}</em><br><br>
-            <div style="white-space: pre-wrap; word-wrap: break-word;">{source.text}</div>
-        </div>
-        """ for i, source in enumerate(result.sources)])
+        sources = [
+            {
+                "index": i + 1,
+                "similarity": source.similarity,
+                "bm25_score": source.bm25_score,
+                "rrf_score": source.rrf_score,
+                "rerank_score": source.rerank_score,
+                "document_id": source.document_id[:8] if source.document_id else "Unknown",
+                "page_number": source.page_number or 'N/A',
+                "text": source.text,
+            }
+            for i, source in enumerate(result.sources)
+        ]
 
         stats = result.search_stats
         input_tok = stats.input_tokens
@@ -158,7 +169,7 @@ async def query_documents_form(
             query=query,
             answer=result.answer.strip(),
             source_count=len(result.sources),
-            sources_html=sources_html,
+            sources=sources,
             chunks_found=stats.chunks_found,
             avg_similarity=f"{stats.avg_similarity:.1%}",
             search_method=stats.search_method,

@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import asyncpg
+from infra.db.pool import ConnectionPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,8 @@ async def log_interaction(payload: InteractionPayload, connection_string: str) -
     Errors are swallowed so the query path is never affected.
     """
     try:
-        conn = await asyncpg.connect(connection_string)
-        try:
+        pool = await ConnectionPoolManager.get_pool(connection_string)
+        async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO llm_interactions (
@@ -62,7 +62,5 @@ async def log_interaction(payload: InteractionPayload, connection_string: str) -
                 payload.table_name,
                 payload.rerank_method,
             )
-        finally:
-            await conn.close()
     except Exception as db_err:
         logger.error("llm_logger: DB insert failed (non-fatal): %s", db_err)

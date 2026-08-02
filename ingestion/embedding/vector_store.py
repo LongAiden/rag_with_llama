@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 import logfire
 
-from infra.db import ConnectionPoolManager, quote_ident
+from infra.db import ConnectionPoolManager, quote_ident, validate_table_name
 from ingestion.embedding.chunk import Chunk
 
 
@@ -44,26 +44,22 @@ class VectorStore:
             self._pool = await ConnectionPoolManager.get_pool(self.connection_string)
         return self._pool
 
-    async def _get_connection(self):
-        """Get a database connection from the pool with pgvector support."""
-        pool = await self._get_pool()
-        conn = await pool.acquire()
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        return conn
-
-    async def _release_connection(self, conn):
-        """Release a connection back to the pool."""
-        pool = await self._get_pool()
-        await pool.release(conn)
-
     @asynccontextmanager
     async def connection(self):
-        """Acquire and release a connection via a context manager."""
-        conn = await self._get_connection()
-        try:
+        """Borrow a pooled connection for the duration of the block.
+
+        Every query in this class goes through here. Releasing via
+        ``async with pool.acquire()`` means the connection returns to the pool on
+        exceptions and on cancellation too — releasing manually after the last
+        statement leaks one connection per failed query, which exhausts the pool.
+
+        The pgvector extension is created once in _initialize_database rather than
+        per acquire: it costs a round trip on every query and needs elevated
+        privileges every time.
+        """
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
             yield conn
-        finally:
-            await self._release_connection(conn)
 
     async def _initialize_database(self):
         """Initialize database with pgvector extension and table."""
@@ -75,8 +71,17 @@ class VectorStore:
                 return
 
             try:
-                conn = await self._get_connection()
-                try:
+                # Index names are identifiers too. Validate the table name first,
+                # then derive and quote the index names from it — interpolating
+                # the raw name here would bypass the check that safe_table_name
+                # happens to perform a few lines further down.
+                validate_table_name(self.table_name)
+                embedding_idx = f'"{self.table_name}_embedding_idx"'
+                document_id_idx = f'"{self.table_name}_document_id_idx"'
+
+                async with self.connection() as conn:
+                    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
                     # Create table with proper vector column
                     # Assuming 384-dimensional embeddings for all-MiniLM-L6-v2
                     # Adjust dimension based on your model
@@ -94,20 +99,18 @@ class VectorStore:
 
                     # Create index for similarity search
                     await conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {self.table_name}_embedding_idx
+                    CREATE INDEX IF NOT EXISTS {embedding_idx}
                     ON {self.safe_table_name} USING hnsw (embedding vector_cosine_ops);
                     """)
 
                     # Create index on document_id for filtering
                     await conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {self.table_name}_document_id_idx
+                    CREATE INDEX IF NOT EXISTS {document_id_idx}
                     ON {self.safe_table_name} (document_id);
                     """)
 
                     self._initialized = True
                     print(f"Database initialized with table: {self.table_name}")
-                finally:
-                    await self._release_connection(conn)
 
             except Exception as e:
                 tb = traceback.format_exc()
@@ -126,8 +129,6 @@ class VectorStore:
         try:
             if not self._initialized:
                 await self._initialize_database()
-
-            conn = await self._get_connection()
 
             # Prepare data for batch insert
             chunk_data = []
@@ -157,11 +158,11 @@ class VectorStore:
             """
 
             # Process in batches
-            for i in range(0, len(chunk_data), batch_size):
-                batch = chunk_data[i:i + batch_size]
-                await conn.executemany(insert_sql, batch)
+            async with self.connection() as conn:
+                for i in range(0, len(chunk_data), batch_size):
+                    batch = chunk_data[i:i + batch_size]
+                    await conn.executemany(insert_sql, batch)
 
-            await self._release_connection(conn)
             print(f"Added {len(chunks)} chunks to vector store")
 
         except Exception as e:
@@ -196,8 +197,6 @@ class VectorStore:
             if not self._initialized:
                 await self._initialize_database()
 
-            conn = await self._get_connection()
-
             # Build query with optional document filtering
             base_query = f"""
                 SELECT
@@ -230,20 +229,19 @@ class VectorStore:
                 """
                 params.append(limit)
 
-            rows = await conn.fetch(base_query, *params)
+            async with self.connection() as conn:
+                rows = await conn.fetch(base_query, *params)
 
-            results = []
-            for row in rows:
-                results.append({
+            return [
+                {
                     'chunk_id': row['id'],
                     'text': row['text'],
                     'metadata': row['metadata'],
                     'document_id': row['document_id'],
                     'similarity': float(row['similarity'])
-                })
-
-            await self._release_connection(conn)
-            return results
+                }
+                for row in rows
+            ]
 
         except Exception as e:
             print(f"Error searching chunks: {e}")
@@ -273,8 +271,6 @@ class VectorStore:
             if not self._initialized:
                 await self._initialize_database()
 
-            conn = await self._get_connection()
-
             base_query = f"""
                 SELECT id, text, metadata, document_id
                 FROM {self.safe_table_name}
@@ -285,16 +281,21 @@ class VectorStore:
                 base_query += " WHERE document_id = ANY($1)"
                 params.append(document_ids)
 
-            rows = await conn.fetch(base_query, *params)
-            await self._release_connection(conn)
+            async with self.connection() as conn:
+                rows = await conn.fetch(base_query, *params)
 
             if not rows:
                 return []
 
-            corpus = [row['text'].lower().split() for row in rows]
-            bm25 = BM25Okapi(corpus)
-            tokenized_query = query.lower().split()
-            bm25_scores = bm25.get_scores(tokenized_query)
+            def _score() -> "np.ndarray":
+                """Tokenise, index, and score. Pure CPU — must not run on the loop."""
+                corpus = [row['text'].lower().split() for row in rows]
+                bm25 = BM25Okapi(corpus)
+                return bm25.get_scores(query.lower().split())
+
+            # Building the index is O(corpus) on every call; keeping it on the event
+            # loop stalls every other request for the duration.
+            bm25_scores = await asyncio.to_thread(_score)
 
             top_indices = np.argsort(bm25_scores)[::-1][:limit]
 
@@ -327,7 +328,6 @@ class VectorStore:
         try:
             if not self._initialized:
                 await self._initialize_database()
-            conn = await self._get_connection()
             query = f"""
                 SELECT id, text, metadata, document_id
                 FROM {self.safe_table_name}
@@ -336,8 +336,8 @@ class VectorStore:
                 ORDER BY (metadata->>'chunk_index')::int
                 LIMIT $3
             """
-            rows = await conn.fetch(query, section_path, document_ids, limit)
-            await self._release_connection(conn)
+            async with self.connection() as conn:
+                rows = await conn.fetch(query, section_path, document_ids, limit)
             return [
                 {
                     'chunk_id': row['id'],
@@ -357,11 +357,10 @@ class VectorStore:
             if not self._initialized:
                 await self._initialize_database()
 
-            conn = await self._get_connection()
-            result = await conn.execute(
-                f"DELETE FROM {self.safe_table_name} WHERE document_id = $1", document_id)
+            async with self.connection() as conn:
+                result = await conn.execute(
+                    f"DELETE FROM {self.safe_table_name} WHERE document_id = $1", document_id)
             deleted_count = int(result.split()[-1]) if result else 0
-            await self._release_connection(conn)
             print(
                 f"Deleted {deleted_count} chunks for document: {document_id}")
             return deleted_count
@@ -375,16 +374,16 @@ class VectorStore:
             if not self._initialized:
                 await self._initialize_database()
 
-            conn = await self._get_connection()
-            row = await conn.fetchrow(f"""
-            SELECT
-                COUNT(*) as total_chunks,
-                COUNT(DISTINCT document_id) as total_documents,
-                AVG(LENGTH(text)) as avg_text_length,
-                MIN(created_at) as earliest_chunk,
-                MAX(created_at) as latest_chunk
-            FROM {self.safe_table_name}
-            """)
+            async with self.connection() as conn:
+                row = await conn.fetchrow(f"""
+                SELECT
+                    COUNT(*) as total_chunks,
+                    COUNT(DISTINCT document_id) as total_documents,
+                    AVG(LENGTH(text)) as avg_text_length,
+                    MIN(created_at) as earliest_chunk,
+                    MAX(created_at) as latest_chunk
+                FROM {self.safe_table_name}
+                """)
 
             stats = {
                 'total_chunks': row['total_chunks'],
@@ -394,7 +393,6 @@ class VectorStore:
                 'latest_chunk': row['latest_chunk'].isoformat() if row['latest_chunk'] else None
             }
 
-            await self._release_connection(conn)
             return stats
         except Exception as e:
             print(f"Error getting stats: {type(e).__name__}: {e}")

@@ -47,7 +47,7 @@ def mock_sentence_transformer():
 @pytest.fixture
 def generator(mock_sentence_transformer):
     """Create an EmbeddingGenerator with a mocked model."""
-    with patch('ingestion.embedding.vector_store.SentenceTransformer') as mock_cls:
+    with patch('ingestion.embedding.generator.SentenceTransformer') as mock_cls:
         mock_cls.return_value = mock_sentence_transformer(embedding_dim=384)
         gen = EmbeddingGenerator(model_name='all-MiniLM-L6-v2')
         yield gen

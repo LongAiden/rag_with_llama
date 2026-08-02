@@ -24,6 +24,11 @@ from retrieval.llm_operations import generate_llm_response
 from models.schemas import RAGResponse, RAGSource, RAGResponseMetadata
 from infra.telemetry import InteractionPayload, log_interaction
 
+# Strong references to in-flight fire-and-forget tasks. asyncio only keeps a weak
+# reference to a running task, so without this the interaction log can be collected
+# before it is written.
+_BACKGROUND_TASKS: set = set()
+
 
 async def perform_document_search(
     query: str,
@@ -106,9 +111,12 @@ async def perform_document_search(
             with logfire.span("cross_encoder_reranking"):
                 try:
                     from retrieval.utils import get_reranker
-                    reranker = get_reranker(config)
+                    # Both the first-call CrossEncoder load and every rerank are
+                    # synchronous and CPU-bound — run them in a worker thread.
+                    reranker = await asyncio.to_thread(get_reranker, config)
                     original_by_id = {r['chunk_id']: r for r in merged_results}
-                    reranked = reranker.rerank(
+                    reranked = await asyncio.to_thread(
+                        reranker.rerank,
                         query=query,
                         results=merged_results,
                         top_k=rerank_top_k,
@@ -229,14 +237,16 @@ async def perform_document_search(
 
         # Step 3: Generate response with LLM
         t0 = time.monotonic()
-        llm_response = await generate_llm_response(query, context, results, config.agent, model=model)
+        llm_response = await generate_llm_response(query, context, results, model=model)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         # Calculate search statistics
         avg_similarity = sum(r['similarity'] for r in results) / len(results)
 
-        # Fire-and-forget: persist interaction to llm_interactions table (and Langfuse if configured)
-        asyncio.create_task(log_interaction(
+        # Fire-and-forget: persist interaction to llm_interactions table (and Langfuse if configured).
+        # The task is kept in _BACKGROUND_TASKS until it finishes — asyncio only holds a
+        # weak reference, so an unreferenced task can be garbage-collected mid-flight.
+        _task = asyncio.create_task(log_interaction(
             InteractionPayload(
                 question=query,
                 answer=llm_response.answer,
@@ -253,6 +263,8 @@ async def perform_document_search(
             ),
             config.connection_string,
         ))
+        _BACKGROUND_TASKS.add(_task)
+        _task.add_done_callback(_BACKGROUND_TASKS.discard)
 
         # Create structured response
         return RAGResponse(

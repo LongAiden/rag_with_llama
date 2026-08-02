@@ -82,16 +82,19 @@ class TestRegisterDocument:
         conn.fetchrow.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_register_duplicate_returns_existing(self, repo, mock_pool):
-        """Test registering a duplicate filename returns the existing row."""
+    async def test_register_same_filename_creates_a_new_document(self, repo, mock_pool):
+        """Re-uploading a filename registers a second, independent document.
+
+        Filename de-duplication was removed (migration 005): the INSERT has no
+        ON CONFLICT clause, so there is exactly one round trip and the caller always
+        gets back the row it just created, never a pre-existing one.
+        """
         _, conn = mock_pool
-        existing_row = {
-            "id": "existing-doc-id",
+        conn.fetchrow = AsyncMock(return_value={
+            "id": "new-doc-id",
             "file_name": "test.pdf",
-            "stage": "parsed",
-        }
-        # First call returns None (ON CONFLICT DO NOTHING), second returns existing
-        conn.fetchrow = AsyncMock(side_effect=[None, existing_row])
+            "stage": "registered",
+        })
 
         result = await repo.register_document(
             doc_id="new-doc-id",
@@ -100,9 +103,10 @@ class TestRegisterDocument:
             file_size=1024,
         )
 
-        assert result["id"] == "existing-doc-id"
-        assert result["stage"] == "parsed"
-        assert conn.fetchrow.call_count == 2
+        assert result["id"] == "new-doc-id"
+        assert result["stage"] == "registered"
+        assert conn.fetchrow.call_count == 1
+        assert "ON CONFLICT" not in conn.fetchrow.call_args[0][0]
 
 
 class TestClaimDocument:
@@ -404,17 +408,6 @@ class TestQueryMethods:
         result = await repo.get_document_status("non-existent-id")
 
         assert result is None
-
-    @pytest.mark.asyncio
-    async def test_is_file_registered(self, repo, mock_pool):
-        """Test checking if a file is already registered."""
-        _, conn = mock_pool
-        conn.fetchrow = AsyncMock(return_value={"?column?": 1})
-
-        assert await repo.is_file_registered("test.pdf") is True
-
-        conn.fetchrow = AsyncMock(return_value=None)
-        assert await repo.is_file_registered("other.pdf") is False
 
     @pytest.mark.asyncio
     async def test_is_path_registered(self, repo, mock_pool):

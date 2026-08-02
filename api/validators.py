@@ -1,9 +1,10 @@
 """
 Validation utilities for the RAG application.
-Handles parameter validation, authentication, and feature flags.
+Handles parameter validation and authentication.
 """
 
 import os
+import secrets
 from typing import Optional
 from fastapi import HTTPException
 
@@ -65,35 +66,9 @@ def require_access_password(provided_password: Optional[str]):
     expected = os.getenv("APP_ACCESS_PASSWORD") or os.getenv("FRONTEND_PASSWORD")
     expected = expected.strip() if expected else ""
 
-    if expected and provided_password != expected:
+    if not expected:
+        return
+
+    # compare_digest, not ==, so comparison time does not leak the shared secret.
+    if not secrets.compare_digest(provided_password or "", expected):
         raise HTTPException(status_code=403, detail="Invalid access password")
-
-
-def celery_enabled() -> bool:
-    """
-    Check whether Celery offloading is enabled for entity extraction.
-
-    Returns:
-        bool: True if Celery is enabled
-    """
-    return os.getenv("USE_CELERY_FOR_EXTRACTION", "false").lower() == "true"
-
-
-def celery_upload_enabled() -> bool:
-    """
-    Check whether uploads should be offloaded to Celery.
-
-    Returns:
-        bool: True if Celery upload processing is enabled
-    """
-    return os.getenv("USE_CELERY_FOR_UPLOAD", "false").lower() == "true"
-
-
-def entity_extraction_enabled() -> bool:
-    """
-    Check whether entity extraction is enabled.
-
-    Returns:
-        bool: True if entity extraction is enabled
-    """
-    return os.getenv("ENABLE_ENTITY_EXTRACTION", "true").lower() == "true"

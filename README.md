@@ -270,16 +270,19 @@ rag_with_llama/
 │   └── raw/                      # Original files from API uploads / weekly scan
 │
 ├── ingestion/                    # Document ingestion pipeline
-│   ├── processors/
-│   │   ├── pdf_to_markdown.py    # PDFToMarkdownConverter (PDF → Markdown)
-│   │   ├── pdf_processor.py      # Raw text extraction fallback
+│   ├── processors/               # Parser per file type + Docling/Ollama/Gemini backends
+│   │   ├── processor_factory.py  # Picks processor by file type
+│   │   ├── pdf_parser_factory.py # Picks PDF backend (Ollama VLM vs Gemini)
+│   │   ├── pdf_processor.py
 │   │   ├── docx_processor.py
-│   │   ├── txt_processor.py
-│   │   └── processor_factory.py  # Picks processor by file type
+│   │   └── txt_processor.py
 │   ├── chunking/
 │   │   └── chunker_factory.py    # token / recursive / markdown / semantic
-│   ├── embedding/
-│   │   └── vector_store.py       # ChunkEmbeddingPipeline + pgvector
+│   ├── embedding/                # Split by responsibility
+│   │   ├── chunk.py               # Chunk dataclass
+│   │   ├── generator.py           # EmbeddingGenerator (SentenceTransformer)
+│   │   ├── vector_store.py        # VectorStore (pgvector data access)
+│   │   └── pipeline.py            # ChunkEmbeddingPipeline (orchestration)
 │   ├── text_cleaning/
 │   │   └── cleaners.py
 │   └── validation/
@@ -288,15 +291,28 @@ rag_with_llama/
 ├── retrieval/
 │   ├── search.py                 # Vector search → BM25 rerank → LLM
 │   ├── llm_operations.py         # LLM answer generation (Gemini or Ollama)
-│   └── utils.py                  # BM25 scorer
+│   ├── reranking.py              # Cross-encoder reranker
+│   └── utils.py                  # BM25 scorer, RRF merge
 │
 ├── api/
 │   ├── app.py                    # FastAPI app, route registration
-│   ├── config.py                 # Re-export shim (config lives in config/)
 │   ├── validators.py
-│   ├── templates.py              # Inline HTML templates
+│   ├── renderer.py               # Jinja2 template renderer
+│   ├── templates/                # HTML templates (Jinja2, autoescaped)
+│   │   ├── base.html
+│   │   ├── home.html
+│   │   ├── search_results.html
+│   │   ├── search_error.html
+│   │   ├── stats.html
+│   │   ├── stats_error.html
+│   │   ├── health_check.html
+│   │   └── health_error.html
 │   └── routes/
-│       └── document_routes.py    # All active endpoints
+│       ├── document_routes.py    # Upload, status, delete document
+│       ├── query_routes.py       # Home page, query / query-form
+│       ├── table_routes.py       # List / count / delete tables
+│       ├── admin_routes.py       # Stats, health check
+│       └── observability_routes.py  # LLM interaction stats/history
 │
 ├── config/
 │   └── app_config.py             # AppConfig, AppSettings, DatabaseConfig
@@ -307,15 +323,14 @@ rag_with_llama/
 ├── worker/
 │   ├── __init__.py
 │   ├── celery_app.py
-│   ├── tasks.py                  # Async upload task
 │   └── ingestion_tasks.py        # Stage-based parse / chunk / embed tasks
 │
-├── infra/
-│   ├── db/                       # Database pool, repositories, identifiers
+├── infra/                        # Shared plumbing (used by 2+ layers)
+│   ├── db/                       # Connection pool, repositories, identifiers
 │   │   ├── pool.py
+│   │   ├── identifiers.py        # validate_table_name, quote_ident
 │   │   ├── table_repository.py
-│   │   ├── ingestion_repository.py
-│   │   └── identifiers.py
+│   │   └── ingestion_repository.py
 │   └── telemetry/                # LLM interaction logger
 │       └── llm_logger.py
 │
@@ -331,11 +346,14 @@ rag_with_llama/
 │   ├── 20260619_project-architecture-summary.md
 │   ├── 20260619_testing.md
 │   ├── 20260626_chunk-context-enrichment.md
-│   └── 20260802_ingestion_workflow.md
+│   ├── 20260802_ingestion_workflow.md
+│   ├── 20260802_ingestion_pipeline_fixes.md
+│   └── 20260802_project_refactoring.md
 │
 ├── migrations/
 │   ├── 002_create_llm_interactions.sql
-│   └── 003_create_ingestion_status.sql
+│   ├── 003_create_ingestion_status.sql
+│   └── 004_ingestion_fixes.sql
 │
 ├── deployment/
 │   ├── Dockerfile                # App image (uses Dockerfile.base)
@@ -348,6 +366,8 @@ rag_with_llama/
 ├── docker-compose.yml
 └── .env.example
 ```
+
+The knowledge-graph feature (entity/relationship extraction) was implemented but never wired into the live app; it's preserved in `.archive/graph_feature/` rather than the main tree.
 
 ---
 
@@ -362,7 +382,7 @@ Copy `.env.example` to `.env` and set these values:
 | `POSTGRES_DB` | No | `rag_db` | Database name |
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model for Q&A |
 | `OLLAMA_BASE_URL` | No | `http://host.docker.internal:11434` | Ollama endpoint (Docker uses host network) |
-| `OLLAMA_MODEL` | No | `deepseek-r1:8b` | Text model for RAG Q&A (runs locally via Ollama) |
+| `OLLAMA_MODEL` | No | `deepseek-r1:1.5b` | Text model for RAG Q&A (runs locally via Ollama) |
 | `OLLAMA_VLM_MODEL` | No | `qwen3.5:4b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
 | `INPUT_RAW_DIR` | No | `input/raw` | Directory for raw uploaded / scanned files |

@@ -1,9 +1,10 @@
 """API routes for admin/observability endpoints: stats and health."""
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 
+from api.dependencies import get_config, get_pipeline_factory
 from api.renderer import render
 from config.app_config import DEFAULT_TABLE_NAME
 from infra.db import TableRepository
@@ -12,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/stats", response_class=HTMLResponse)
-async def get_database_stats(get_pipeline=None):
+async def get_database_stats(get_pipeline=Depends(get_pipeline_factory)):
     """Get database statistics from ALL chunk tables."""
     try:
         pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
@@ -79,7 +80,10 @@ async def get_database_stats(get_pipeline=None):
 
 
 @router.get("/health", response_class=HTMLResponse)
-async def health_check(get_pipeline=None, config=None):
+async def health_check(
+    get_pipeline=Depends(get_pipeline_factory),
+    config=Depends(get_config),
+):
     """Health check endpoint to verify system status."""
     try:
         pipeline = None
