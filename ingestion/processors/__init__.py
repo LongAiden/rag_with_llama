@@ -3,7 +3,6 @@ Document processor implementations using Abstract Method pattern.
 """
 
 from .base_processor import DocumentProcessor
-from .pdf_processor import PDFProcessor
 from .docx_processor import DOCXProcessor
 from .txt_processor import TXTProcessor
 from ingestion.processors.processor_factory import (
@@ -18,7 +17,6 @@ from .pdf_parser_factory import create_pdf_parser
 
 __all__ = [
     'DocumentProcessor',
-    'PDFProcessor',
     'DOCXProcessor',
     'TXTProcessor',
     'ProcessorRegistry',

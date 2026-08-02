@@ -41,7 +41,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    HF_HOME=/home/appuser/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/home/appuser/.cache/sentence_transformers \
+    TRANSFORMERS_OFFLINE=0
 
 WORKDIR /app
 
@@ -72,8 +75,17 @@ RUN mkdir -p /app/data /app/logs /app/input/raw
 
 # Security: Run as non-root user
 RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+    mkdir -p /home/appuser/.cache/huggingface /home/appuser/.cache/sentence_transformers && \
+    chown -R appuser:appuser /home/appuser/.cache /app
+
+# Pre-download the default embedding model so workers don't have to fetch it
+# on first task. This avoids the runtime memory spike and cold-start latency.
 USER appuser
+RUN python - <<'PY'
+from sentence_transformers import SentenceTransformer
+from config.app_config import DEFAULT_EMBEDDING_MODEL
+SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+PY
 
 EXPOSE 8000
 

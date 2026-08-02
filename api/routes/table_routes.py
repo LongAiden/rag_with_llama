@@ -1,5 +1,6 @@
 """API routes for table management."""
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import logfire
@@ -7,18 +8,24 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 
 from api.dependencies import get_config, get_forget_pipeline, get_pipeline_factory
 from api.validators import require_access_password, validate_table_name
-from config.app_config import DEFAULT_TABLE_NAME
-from infra.db import IngestionRepository, TableRepository
+from infra.db import ConnectionPoolManager, IngestionRepository, TableRepository
 
 router = APIRouter()
 
 
+@asynccontextmanager
+async def _table_connection(connection_string: str):
+    """Borrow a pooled connection without instantiating a pipeline."""
+    pool = await ConnectionPoolManager.get_pool(connection_string)
+    async with pool.acquire() as conn:
+        yield conn
+
+
 @router.get("/tables/count")
-async def get_table_count(get_pipeline=Depends(get_pipeline_factory)):
+async def get_table_count(config=Depends(get_config)):
     """Return the number of chunk tables in the database."""
     try:
-        pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
-        async with pipeline.vector_store.connection() as conn:
+        async with _table_connection(config.connection_string) as conn:
             repo = TableRepository(conn)
             table_names = await repo.list_chunk_tables()
             return {"table_count": len(table_names), "table_names": table_names}
@@ -27,11 +34,10 @@ async def get_table_count(get_pipeline=Depends(get_pipeline_factory)):
 
 
 @router.get("/tables")
-async def list_tables(get_pipeline=Depends(get_pipeline_factory)):
+async def list_tables(config=Depends(get_config)):
     """List all chunk tables in the database with row counts."""
     try:
-        pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
-        async with pipeline.vector_store.connection() as conn:
+        async with _table_connection(config.connection_string) as conn:
             repo = TableRepository(conn)
             table_names = await repo.list_chunk_tables()
 

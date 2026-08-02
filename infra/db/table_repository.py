@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 
 import asyncpg
 
+from config.app_config import DEFAULT_TABLE_NAME
 from infra.db.identifiers import quote_ident, validate_table_name
 
 _SYSTEM_TABLES = frozenset([
@@ -30,7 +31,22 @@ class TableRepository:
 
     async def list_chunk_tables(self) -> List[str]:
         rows = await self.conn.fetch(CHUNK_TABLES_QUERY)
-        return [row['table_name'] for row in rows]
+        tables = [row['table_name'] for row in rows]
+
+        # The default chunk table is auto-created on first pipeline use. If it has
+        # never held any data, don't include it in listings so the table list stays
+        # empty until a user actually creates/uploads to a table.
+        if DEFAULT_TABLE_NAME in tables and await self._table_is_empty(DEFAULT_TABLE_NAME):
+            tables.remove(DEFAULT_TABLE_NAME)
+
+        return tables
+
+    async def _table_is_empty(self, table_name: str) -> bool:
+        safe_name = quote_ident(table_name)
+        row = await self.conn.fetchrow(
+            f"SELECT EXISTS (SELECT 1 FROM {safe_name} LIMIT 1) AS has_rows"
+        )
+        return not row['has_rows']
 
     async def table_exists(self, table_name: str) -> bool:
         validate_table_name(table_name)

@@ -547,6 +547,21 @@ docker exec -it rag_redis redis-cli
 
 ---
 
+## Roadmap
+
+Planned for upcoming phases:
+
+**Conversation memory**
+Today each `/query` call is stateless — `session_id` only tags the Langfuse trace, no chat history is carried between turns. Next phase adds session-scoped conversation memory (likely Redis-backed, keyed by `session_id`) so follow-up questions can reference prior turns in the same session. A message/token cap per session bounds prompt size and cost, with oldest turns evicted or summarized once the limit is hit.
+
+**LangGraph conversation routing**
+Introduce a LangGraph graph in front of `retrieval/search.py` to route each incoming message — e.g. distinguish a new question (run full retrieval) from a follow-up (reuse prior context), a greeting/small talk (skip retrieval), or an out-of-scope request (short-circuit to a fallback response) — instead of always running the same vector search → rerank → LLM path.
+
+**Guardrails**
+Add input/output guardrails around the LLM call in `retrieval/llm_operations.py`: input-side checks (prompt injection, off-topic/abuse filtering) and output-side checks (PII leakage, hallucination/groundedness against retrieved chunks, refusal on unsafe content) before a response is returned to the user.
+
+---
+
 ## Further Reading
 
 - [Chunking Strategies](docs/20260619_chunking-strategies.md)

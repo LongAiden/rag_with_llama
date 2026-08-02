@@ -7,7 +7,6 @@ from typing import List, Optional
 from pathlib import Path
 
 from .base_processor import DocumentProcessor
-from .pdf_processor import PDFProcessor
 from .docx_processor import DOCXProcessor
 from .txt_processor import TXTProcessor
 
@@ -26,8 +25,11 @@ class ProcessorRegistry:
         self._register_default_processors()
 
     def _register_default_processors(self):
-        """Register all built-in processors."""
-        self.register(PDFProcessor())
+        """Register all built-in processors.
+
+        PDFs are handled by the docling-based parsers in the pipeline, not by the
+        generic processor registry.
+        """
         self.register(DOCXProcessor())
         self.register(TXTProcessor())
 

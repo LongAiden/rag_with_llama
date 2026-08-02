@@ -451,6 +451,18 @@ class TestQueryMethods:
         assert await repo.delete_document("nope") is None
 
     @pytest.mark.asyncio
+    async def test_delete_documents_for_table_when_table_missing(self, repo, mock_pool):
+        """If the ingestion status table does not exist, cleanup is a no-op."""
+        _, conn = mock_pool
+        conn.fetchval = AsyncMock(return_value=False)
+        conn.fetch = AsyncMock()
+
+        result = await repo.delete_documents_for_table("test")
+
+        assert result == []
+        conn.fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_get_pending_doc_ids(self, repo, mock_pool):
         """Test getting pending document IDs by stage."""
         _, conn = mock_pool

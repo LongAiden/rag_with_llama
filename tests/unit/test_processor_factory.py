@@ -25,20 +25,13 @@ class TestProcessorRegistry:
     def test_default_processors_registered(self):
         registry = ProcessorRegistry()
         processors = registry.list_processors()
-        assert len(processors) >= 3
+        assert len(processors) == 2
 
     def test_get_supported_extensions(self):
         registry = ProcessorRegistry()
         extensions = registry.get_supported_extensions()
-        assert ".pdf" in extensions
         assert ".txt" in extensions
         assert ".docx" in extensions
-
-    def test_get_processor_for_pdf(self):
-        registry = ProcessorRegistry()
-        processor = registry.get_processor("test.pdf")
-        assert processor is not None
-        assert processor.can_process("test.pdf")
 
     def test_get_processor_for_txt(self):
         registry = ProcessorRegistry()
@@ -56,11 +49,6 @@ class TestProcessorRegistry:
         registry = ProcessorRegistry()
         with pytest.raises(ValueError, match="No processor found"):
             registry.get_processor("test.xyz")
-
-    def test_get_processor_case_insensitive(self):
-        registry = ProcessorRegistry()
-        processor = registry.get_processor("test.PDF")
-        assert processor is not None
 
     def test_register_custom_processor(self):
         registry = ProcessorRegistry()
@@ -88,9 +76,9 @@ class TestGetRegistrySingleton:
 
 
 class TestGetProcessorForFile:
-    def test_returns_processor_for_pdf(self):
+    def test_returns_processor_for_docx(self):
         pf_module._global_registry = None
-        processor = get_processor_for_file("document.pdf")
+        processor = get_processor_for_file("document.docx")
         assert processor is not None
         pf_module._global_registry = None
 

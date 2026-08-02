@@ -357,6 +357,14 @@ class IngestionRepository:
         """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
+            # If the ingestion status table has never been created (e.g. migrations
+            # not run), there is nothing to clean up and the chunk table drop should
+            # still succeed.
+            table_exists = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'documents')",
+            )
+            if not table_exists:
+                return []
             rows = await conn.fetch(
                 "DELETE FROM documents WHERE target_table_name = $1 RETURNING *",
                 target_table_name,

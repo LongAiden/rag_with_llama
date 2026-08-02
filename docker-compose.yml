@@ -172,11 +172,11 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: "0.5"
-          memory: 256M
-    command: celery -A worker.celery_app worker -Q upload --loglevel=info
+          memory: 512M
+    command: celery -A worker.celery_app worker -Q upload --loglevel=info -c 1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -227,11 +227,11 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: "0.5"
-          memory: 256M
-    command: celery -A worker.celery_app worker -Q ingestion --loglevel=info
+          memory: 512M
+    command: celery -A worker.celery_app worker -Q ingestion --loglevel=info -c 1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432

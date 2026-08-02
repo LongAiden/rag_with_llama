@@ -371,10 +371,21 @@ class VectorStore:
     async def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the vector store."""
         try:
-            if not self._initialized:
-                await self._initialize_database()
-
+            validate_table_name(self.table_name)
             async with self.connection() as conn:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1)",
+                    self.table_name,
+                )
+                if not exists:
+                    return {
+                        'total_chunks': 0,
+                        'total_documents': 0,
+                        'avg_text_length': 0,
+                        'earliest_chunk': None,
+                        'latest_chunk': None,
+                    }
+
                 row = await conn.fetchrow(f"""
                 SELECT
                     COUNT(*) as total_chunks,

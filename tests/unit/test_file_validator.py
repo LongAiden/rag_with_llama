@@ -162,7 +162,7 @@ class TestFakePdfDetection:
         assert result.file_type == SupportedFileType.PDF
         # File is readable, so it passes basic validation
         assert result.is_valid is True
-        # Note: Full PDF validation happens in PDFProcessor
+        # Note: Full PDF parsing happens in the docling-based PDF parser
 
     def test_empty_pdf_file(self, temp_dir):
         """Test handling of empty PDF file."""

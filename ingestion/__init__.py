@@ -5,7 +5,6 @@ Handles document processing, chunking, embedding, and validation.
 
 from ingestion.processors import (
     DocumentProcessor,
-    PDFProcessor,
     DOCXProcessor,
     TXTProcessor,
     get_processor_for_file,
@@ -19,7 +18,6 @@ from ingestion.processors.page_utils import (
 __all__ = [
     # Processors
     'DocumentProcessor',
-    'PDFProcessor',
     'DOCXProcessor',
     'TXTProcessor',
     'get_processor_for_file',

@@ -110,3 +110,4 @@ yarn-error.log
 *.bak
 *.backup
 *.old
+*.archive

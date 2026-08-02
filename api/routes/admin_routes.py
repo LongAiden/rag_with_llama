@@ -1,5 +1,6 @@
 """API routes for admin/observability endpoints: stats and health."""
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
@@ -7,32 +8,47 @@ from fastapi.responses import HTMLResponse
 from api.dependencies import get_config, get_pipeline_factory
 from api.renderer import render
 from config.app_config import DEFAULT_TABLE_NAME
-from infra.db import TableRepository
+from infra.db import ConnectionPoolManager, TableRepository
 
 router = APIRouter()
 
 
+@asynccontextmanager
+async def _admin_connection(connection_string: str):
+    """Borrow a pooled connection without instantiating a pipeline."""
+    pool = await ConnectionPoolManager.get_pool(connection_string)
+    async with pool.acquire() as conn:
+        yield conn
+
+
 @router.get("/stats", response_class=HTMLResponse)
-async def get_database_stats(get_pipeline=Depends(get_pipeline_factory)):
+async def get_database_stats(config=Depends(get_config)):
     """Get database statistics from ALL chunk tables."""
     try:
-        pipeline = await get_pipeline(DEFAULT_TABLE_NAME)
-        async with pipeline.vector_store.connection() as conn:
+        async with _admin_connection(config.connection_string) as conn:
             repo = TableRepository(conn)
             table_names = await repo.list_chunk_tables()
 
-            print(f"\n📊 Found chunk tables: {', '.join(table_names) if table_names else 'none'}")
+        print(f"\n📊 Found chunk tables: {', '.join(table_names) if table_names else 'none'}")
 
-            if not table_names:
-                stats = await pipeline.get_stats()
-                table_display = pipeline.vector_store.table_name
-            else:
-                total_docs = 0
-                total_chunks = 0
-                total_text_length = 0
-                earliest = None
-                latest = None
+        if not table_names:
+            stats = {
+                'total_documents': 0,
+                'total_chunks': 0,
+                'avg_text_length': 0,
+                'earliest_chunk': None,
+                'latest_chunk': None,
+            }
+            table_display = DEFAULT_TABLE_NAME
+        else:
+            total_docs = 0
+            total_chunks = 0
+            total_text_length = 0
+            earliest = None
+            latest = None
 
+            async with _admin_connection(config.connection_string) as conn:
+                repo = TableRepository(conn)
                 for table_name in table_names:
                     result = await repo.get_table_stats(table_name)
 
@@ -47,30 +63,28 @@ async def get_database_stats(get_pipeline=Depends(get_pipeline_factory)):
                     if result['latest'] and (latest is None or result['latest'] > latest):
                         latest = result['latest']
 
-                stats = {
-                    'total_documents': total_docs,
-                    'total_chunks': total_chunks,
-                    'avg_text_length': total_text_length / total_chunks if total_chunks > 0 else 0,
-                    'earliest_chunk': earliest,
-                    'latest_chunk': latest,
-                }
+            stats = {
+                'total_documents': total_docs,
+                'total_chunks': total_chunks,
+                'avg_text_length': total_text_length / total_chunks if total_chunks > 0 else 0,
+                'earliest_chunk': earliest,
+                'latest_chunk': latest,
+            }
 
-                table_display = f"ALL TABLES ({len(table_names)} tables)"
-                print(f"📊 TOTAL: {total_docs} documents, {total_chunks} chunks\n")
+            table_display = f"ALL TABLES ({len(table_names)} tables)"
+            print(f"📊 TOTAL: {total_docs} documents, {total_chunks} chunks\n")
 
-            return render(
-                "stats.html",
-                total_documents=f"{stats['total_documents']:,}",
-                total_chunks=f"{stats['total_chunks']:,}",
-                avg_text_length=f"{stats['avg_text_length']:.0f}",
-                avg_chunks_per_doc=f"{stats['total_chunks'] // max(stats['total_documents'], 1):.0f}",
-                total_tables=len(table_names) if table_names else 1,
-                embedding_model=pipeline.embedding_generator.model_name,
-                embedding_dim=pipeline.embedding_generator.embedding_dim,
-                table_name=table_display,
-                earliest_chunk=str(stats['earliest_chunk']) if stats['earliest_chunk'] else 'No documents yet',
-                latest_chunk=str(stats['latest_chunk']) if stats['latest_chunk'] else 'No documents yet',
-            )
+        return render(
+            "stats.html",
+            total_documents=f"{stats['total_documents']:,}",
+            total_chunks=f"{stats['total_chunks']:,}",
+            avg_text_length=f"{stats['avg_text_length']:.0f}",
+            avg_chunks_per_doc=f"{stats['total_chunks'] // max(stats['total_documents'], 1):.0f}",
+            total_tables=len(table_names) if table_names else 1,
+            table_name=table_display,
+            earliest_chunk=str(stats['earliest_chunk']) if stats['earliest_chunk'] else 'No documents yet',
+            latest_chunk=str(stats['latest_chunk']) if stats['latest_chunk'] else 'No documents yet',
+        )
 
     except Exception as e:
         print(f"❌ Stats error: {str(e)}")
