@@ -189,7 +189,7 @@ class TestTransitionMethods:
         await repo.transition_to_parsed(
             doc_id="test-doc-id",
             parsed_text="This is parsed text.",
-            parser_used="PyMuPDF",
+            parser_used="gemini-docling",
             file_type="pdf",
             metadata={"file_type": "pdf"},
         )
@@ -216,7 +216,7 @@ class TestTransitionMethods:
         await repo.transition_to_parsed(
             doc_id="test-doc-id",
             parsed_text="text",
-            parser_used="PyMuPDF",
+            parser_used="gemini-docling",
             file_type="pdf",
         )
 
@@ -242,7 +242,7 @@ class TestTransitionMethods:
             doc_id="test-doc-id",
             chunks=chunks,
             chunk_size=512,
-            metadata={"parser_used": "PyMuPDF"},
+            metadata={"parser_used": "gemini-docling"},
         )
 
         assert conn.fetchrow.call_count == 2
@@ -476,7 +476,7 @@ class TestQueryMethods:
         _, conn = mock_pool
         expected = {
             "parsed_text": "This is parsed text.",
-            "parser_used": "PyMuPDF",
+            "parser_used": "gemini-docling",
         }
         conn.fetchrow = AsyncMock(return_value=expected)
 

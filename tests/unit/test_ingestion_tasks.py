@@ -33,7 +33,7 @@ def mock_repo():
 def parsed_result():
     return {
         "parsed_text": "This is parsed text from a document.",
-        "parser_used": "PyMuPDF",
+        "parser_used": "gemini-docling",
         "filename": "test.pdf",
         "file_type": "pdf",
         "file_size": 1024,
@@ -231,7 +231,7 @@ class TestChunkDocumentTask:
         })
         mock_repo.get_parsed = AsyncMock(return_value={
             "parsed_text": "This is parsed text.",
-            "parser_used": "PyMuPDF",
+            "parser_used": "gemini-docling",
             "metadata": {"file_type": "pdf", "page_mapping": []},
         })
         mock_repo.transition_to_chunked = AsyncMock()
@@ -267,7 +267,7 @@ class TestChunkDocumentTask:
         })
         mock_repo.get_parsed = AsyncMock(return_value={
             "parsed_text": "# Heading\n[Page 1] text",
-            "parser_used": "PyMuPDF",
+            "parser_used": "gemini-docling",
             "metadata": {"file_type": "pdf", "page_mapping": []},
         })
         mock_repo.transition_to_chunked = AsyncMock()
@@ -296,7 +296,7 @@ class TestChunkDocumentTask:
         })
         mock_repo.get_parsed = AsyncMock(return_value={
             "parsed_text": "text",
-            "parser_used": "PyMuPDF",
+            "parser_used": "gemini-docling",
             "metadata": {"file_type": "pdf"},
         })
         mock_repo.transition_to_chunked = AsyncMock()
@@ -365,7 +365,7 @@ class TestEmbedDocumentTask:
                 {"text": "chunk 1", "page_number": 1},
                 {"text": "chunk 2", "page_number": 2},
             ],
-            "metadata": {"parser_used": "PyMuPDF", "file_type": "pdf"},
+            "metadata": {"parser_used": "gemini-docling", "file_type": "pdf"},
         })
         mock_repo.transition_to_embedded = AsyncMock()
 
@@ -379,7 +379,7 @@ class TestEmbedDocumentTask:
 
         kwargs = mock_pipeline.embed_chunks.call_args.kwargs
         assert kwargs["file_type"] == "pdf"
-        assert kwargs["parser_used"] == "PyMuPDF"
+        assert kwargs["parser_used"] == "gemini-docling"
 
     @pytest.mark.asyncio
     @patch("worker.ingestion_tasks._get_pipeline")
@@ -409,7 +409,7 @@ class TestEmbedDocumentTask:
         })
         mock_repo.get_chunked = AsyncMock(return_value={
             "chunks": [{"text": "chunk 1", "page_number": 3, "section_path": "[A]"}],
-            "metadata": {"parser_used": "PyMuPDF"},
+            "metadata": {"parser_used": "gemini-docling"},
         })
         mock_repo.transition_to_embedded = AsyncMock()
 

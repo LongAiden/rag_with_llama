@@ -254,7 +254,7 @@ class GeminiDoclingParser(PDFParserBase):
     """
     Hybrid PDF → Markdown using Docling layout extraction and Gemini
     for complex tables (> complex_table_rows rows or > complex_table_cols cols)
-    and figures. No fitz — image rendering is 100% via docling.
+    and figures. Image rendering is 100% via docling.
     """
 
     def __init__(
