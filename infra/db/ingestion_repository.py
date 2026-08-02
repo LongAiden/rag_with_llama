@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 
-from repositories.connection_pool import ConnectionPoolManager
+from infra.db.pool import ConnectionPoolManager
 
 
 class IngestionRepository:

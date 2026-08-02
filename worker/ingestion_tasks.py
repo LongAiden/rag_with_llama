@@ -70,7 +70,7 @@ def _get_config():
 
 
 def _get_repo(config):
-    from repositories.ingestion_repository import IngestionRepository
+    from infra.db import IngestionRepository
     return IngestionRepository(connection_string=config.connection_string)
 
 

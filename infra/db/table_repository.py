@@ -1,9 +1,8 @@
-import re
 from typing import List, Dict, Any
 
 import asyncpg
 
-_SAFE_TABLE_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]{0,62}$')
+from infra.db.identifiers import quote_ident, validate_table_name
 
 _SYSTEM_TABLES = frozenset([
     'entities', 'relationships', 'entity_nodes', 'entity_edges',
@@ -23,20 +22,6 @@ CHUNK_TABLES_QUERY = """
       AND t1.table_name NOT IN ('entities', 'relationships', 'entity_nodes', 'entity_edges')
     ORDER BY t1.table_name
 """
-
-
-def validate_table_name(table_name: str) -> str:
-    if not _SAFE_TABLE_PATTERN.match(table_name):
-        raise ValueError(
-            f"Invalid table name: {table_name!r}. "
-            "Use only letters, digits, and underscores (max 63 chars, must start with letter/underscore)."
-        )
-    return table_name
-
-
-def quote_ident(name: str) -> str:
-    validate_table_name(name)
-    return f'"{name}"'
 
 
 class TableRepository:

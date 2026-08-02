@@ -22,7 +22,7 @@ except ImportError:
 from retrieval.utils import merge_with_rrf
 from retrieval.llm_operations import generate_llm_response
 from models.models import RAGResponse, RAGSource, RAGResponseMetadata
-from observability.llm_logger import InteractionPayload, log_interaction
+from infra.telemetry import InteractionPayload, log_interaction
 
 
 async def perform_document_search(

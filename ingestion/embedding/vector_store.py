@@ -1,8 +1,7 @@
 from ingestion.processors.processor_factory import get_processor_for_file
 from ingestion.processors.page_utils import get_page_number_for_position
 from ingestion.text_cleaning.cleaners import TextCleaningPipeline
-from repositories.table_repository import quote_ident
-from repositories.connection_pool import ConnectionPoolManager
+from infra.db import quote_ident, ConnectionPoolManager
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from sentence_transformers import SentenceTransformer
@@ -393,7 +392,7 @@ class VectorStore:
                 embedding_str = '[' + ','.join(map(str, chunk.embedding)) + ']'
 
                 # metadata is passed as a dict — the pool registers a jsonb codec
-                # (see repositories/connection_pool.py), so asyncpg encodes it.
+                # (see infra/db/pool.py), so asyncpg encodes it.
                 chunk_data.append((
                     chunk.id,
                     chunk.document_id,

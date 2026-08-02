@@ -4,13 +4,11 @@ Handles parameter validation, authentication, and feature flags.
 """
 
 import os
-import re
 from typing import Optional
 from fastapi import HTTPException
 
-_SAFE_TABLE_NAME = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]{0,62}$')
-
 from api.config import ALLOWED_CONTENT_TYPES
+from infra.db.identifiers import validate_table_name as _validate_table_name
 
 
 def validate_table_name(table_name: str):
@@ -21,11 +19,13 @@ def validate_table_name(table_name: str):
     Raises:
         HTTPException: 400 if the name does not match safe identifier rules
     """
-    if not _SAFE_TABLE_NAME.match(table_name):
+    try:
+        _validate_table_name(table_name)
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="Invalid table name. Use only letters, digits, and underscores (max 63 chars, must start with a letter or underscore)."
-        )
+            detail=str(exc)
+        ) from exc
 
 
 def validate_upload_params(chunk_size: int, content_type: str):

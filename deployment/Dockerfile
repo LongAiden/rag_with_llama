@@ -64,8 +64,7 @@ COPY models/ ./models/
 COPY worker/ ./worker/
 COPY config/ ./config/
 COPY migrations/ ./migrations/
-COPY repositories/ ./repositories/
-COPY observability/ ./observability/
+COPY infra/ ./infra/
 
 # Required directories for runtime state
 RUN mkdir -p /app/data /app/logs /app/input/raw

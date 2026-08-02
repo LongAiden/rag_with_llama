@@ -1,5 +1,5 @@
 """
-Unit tests for repositories/table_repository.py (pure functions only).
+Unit tests for infra/db/identifiers.py (pure functions only).
 
 Covers:
 - validate_table_name (valid/invalid names)
@@ -7,7 +7,7 @@ Covers:
 """
 import pytest
 
-from repositories.table_repository import validate_table_name, quote_ident
+from infra.db.identifiers import validate_table_name, quote_ident
 
 
 class TestValidateTableName:

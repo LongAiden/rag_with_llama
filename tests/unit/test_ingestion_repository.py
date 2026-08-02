@@ -48,7 +48,7 @@ def mock_pool():
 @pytest.fixture
 def repo(mock_pool):
     """Create an IngestionRepository with a mock pool."""
-    from repositories.ingestion_repository import IngestionRepository
+    from infra.db import IngestionRepository
     pool, _ = mock_pool
     return IngestionRepository(connection_string="postgresql://test:test@localhost/test", pool=pool)
 

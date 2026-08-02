@@ -29,8 +29,7 @@ COPY retrieval/ ./retrieval/
 COPY models/ ./models/
 COPY worker/ ./worker/
 COPY config/ ./config/
-COPY repositories/ ./repositories/
-COPY observability/ ./observability/
+COPY infra/ ./infra/
 COPY migrations/ ./migrations/
 
 # Note: tests/ directory will be mounted as a volume in docker-compose

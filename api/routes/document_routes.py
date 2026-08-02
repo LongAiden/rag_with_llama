@@ -18,8 +18,8 @@ from api.validators import (
     validate_upload_params,
     require_access_password,
 )
-from repositories.ingestion_repository import IngestionRepository
-from repositories.table_repository import TableRepository, validate_table_name
+from infra.db import IngestionRepository, TableRepository
+from api.validators import validate_table_name
 from retrieval.search import perform_document_search
 from worker.ingestion_tasks import UPLOAD_QUEUE, build_ingestion_chain
 
