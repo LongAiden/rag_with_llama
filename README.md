@@ -357,7 +357,7 @@ Copy `.env.example` to `.env` and set these values:
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model for Q&A |
 | `OLLAMA_BASE_URL` | No | `http://host.docker.internal:11434` | Ollama endpoint (Docker uses host network) |
 | `OLLAMA_MODEL` | No | `deepseek-r1:8b` | Text model for RAG Q&A (runs locally via Ollama) |
-| `OLLAMA_VLM_MODEL` | No | `qwen3.5:9b` | VLM model for PDF image/table extraction (multimodal) |
+| `OLLAMA_VLM_MODEL` | No | `qwen3.5:4b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
 | `INPUT_RAW_DIR` | No | `input/raw` | Directory for raw uploaded / scanned files |
 | `INGESTION_MAX_ATTEMPTS` | No | `2` | Max retries before marking a document `failed` |
