@@ -55,23 +55,6 @@ import api.routes.observability_routes as _obs_routes
 _obs_routes._connection_string = config.connection_string
 app.include_router(_obs_routes.router)
 
-# -----------------------------------------------
-# GRAPH ROUTES - currently disabled
-# The knowledge-graph feature (entity extraction,
-# relationship extraction, graph-enriched search)
-# is implemented but not active.
-#
-# To re-enable:
-#   1. Uncomment the two lines below
-#   2. Wire entity extraction back into upload_and_process()
-#      (see api/routes/document_routes.py)
-#   3. Wire graph enrichment back into perform_document_search()
-#      (see retrieval/search.py)
-#
-# from api.routes.graph_routes import router as graph_router
-# app.include_router(graph_router)
-# -----------------------------------------------
-
 # Import route handlers from api_routes module
 from api.routes.document_routes import (
     home,

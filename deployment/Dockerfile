@@ -61,7 +61,6 @@ COPY api/ ./api/
 COPY ingestion/ ./ingestion/
 COPY retrieval/ ./retrieval/
 COPY models/ ./models/
-COPY graph_processing/ ./graph_processing/
 COPY worker/ ./worker/
 COPY config/ ./config/
 COPY migrations/ ./migrations/
