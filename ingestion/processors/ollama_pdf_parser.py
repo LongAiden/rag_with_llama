@@ -41,7 +41,7 @@ class OllamaPDFParser(GeminiDoclingParser):
     def __init__(
         self,
         ollama_base_url: str = "http://localhost:11434",
-        vlm_model: str = "qwen3.5:4b",
+        vlm_model: str = "qwen3.5:0.8b",
         vlm_timeout: float = 300.0,
         images_scale: float = 0.75,
         complex_table_rows: int = 8,

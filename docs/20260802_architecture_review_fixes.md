@@ -334,7 +334,7 @@ The 12 remaining failures are **all pre-existing** and unrelated to this work:
 - **6 in `test_delete_table_security.py`** — a `MagicMock` recursing inside FastAPI's
   `jsonable_encoder` during response serialization. Confirmed pre-existing by reverting
   only the changed files and re-running: identical 6 failed / 8 passed.
-- **1 in `test_app_config.py`** — asserts the Ollama default is `deepseek-r1:8b` while
+- **1 in `test_app_config.py`** — asserts the Ollama default is `deepseek-r1:1.5b` while
   `config/app_config.py` defaults to `deepseek-r1:1.5b`. The test is also
   environment-dependent: `patch.dict(os.environ, {}, clear=True)` does not stop
   pydantic-settings from reading a `.env` file.

@@ -17,7 +17,7 @@ from ingestion.processors.pdf_parser_factory import create_pdf_parser
 def mock_settings():
     settings = MagicMock()
     settings.ollama_base_url = "http://localhost:11434"
-    settings.ollama_vlm_model = "qwen3.5:4b"
+    settings.ollama_vlm_model = "qwen3.5:0.8b"
     settings.google_api_key = "test-api-key"
     settings.gemini_model = "gemini-2.5-flash"
     return settings
@@ -53,7 +53,7 @@ class TestCreatePdfParser:
             create_pdf_parser("ollama", mock_settings)
             mock_cls.assert_called_once_with(
                 ollama_base_url="http://localhost:11434",
-                vlm_model="qwen3.5:4b",
+                vlm_model="qwen3.5:0.8b",
             )
 
     def test_gemini_passes_correct_params(self, mock_settings):

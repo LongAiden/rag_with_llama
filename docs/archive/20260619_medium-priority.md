@@ -138,7 +138,7 @@ class DatabaseSettings(BaseSettings):
 
 class LLMSettings(BaseSettings):
     provider: str = "ollama"
-    ollama_model: str = "deepseek-r1:8b"
+    ollama_model: str = "deepseek-r1:1.5b"
     gemini_model: str = "gemini-2.5-flash"
     # ...
 

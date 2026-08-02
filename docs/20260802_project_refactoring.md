@@ -66,9 +66,9 @@ This document summarizes the refactoring work performed on the RAG pipeline proj
 
 ### 5. OLLAMA_VLM_MODEL Mismatch
 
-**Problem**: The `app` service in `docker-compose.yml` used `qwen3.5:4b` while all Celery workers used `qwen3.5:4b`. The `.env.example` specified `4b`.
+**Problem**: The `app` service in `docker-compose.yml` used `qwen3.5:0.8b` while all Celery workers used `qwen3.5:0.8b`. The `.env.example` specified `4b`.
 
-**Solution**: Standardized all services to use `qwen3.5:4b` to match the workers and ensure consistent VLM capabilities.
+**Solution**: Standardized all services to use `qwen3.5:0.8b` to match the workers and ensure consistent VLM capabilities.
 
 **Files Changed**:
 - `docker-compose.yml`

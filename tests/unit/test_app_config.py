@@ -97,7 +97,7 @@ class TestGetOllamaModel:
             from config.app_config import get_ollama_model
             result = get_ollama_model()
 
-            assert result == 'deepseek-r1:8b'
+            assert result == 'deepseek-r1:1.5b'
 
     def test_returns_configured_value(self):
         """Test that get_ollama_model returns configured value."""

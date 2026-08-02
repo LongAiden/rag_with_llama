@@ -383,7 +383,7 @@ Copy `.env.example` to `.env` and set these values:
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model for Q&A |
 | `OLLAMA_BASE_URL` | No | `http://host.docker.internal:11434` | Ollama endpoint (Docker uses host network) |
 | `OLLAMA_MODEL` | No | `deepseek-r1:1.5b` | Text model for RAG Q&A (runs locally via Ollama) |
-| `OLLAMA_VLM_MODEL` | No | `qwen3.5:4b` | VLM model for PDF image/table extraction (multimodal) |
+| `OLLAMA_VLM_MODEL` | No | `qwen3.5:0.8b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
 | `INPUT_RAW_DIR` | No | `input/raw` | Directory for raw uploaded / scanned files |
 | `INGESTION_MAX_ATTEMPTS` | No | `2` | Max retries before marking a document `failed` |
@@ -407,7 +407,7 @@ GeminiBackend  →  genai.GenerativeModel(model).generate_content(prompt)  →  
 OllamaBackend  →  POST OLLAMA_BASE_URL/api/generate  →  Ollama (runs on Windows host)
 ```
 
-- `OLLAMA_MODEL` - the text model used to answer RAG questions (e.g. `deepseek-r1:8b`)
+- `OLLAMA_MODEL` - the text model used to answer RAG questions (e.g. `deepseek-r1:1.5b`)
 - `OLLAMA_VLM_MODEL` - the vision model used to describe images and complex tables during PDF parsing (Docling + Ollama backend only)
 
 No API key or internet connection is required for Ollama models. `GOOGLE_API_KEY` is only needed when using a Gemini model.

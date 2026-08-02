@@ -19,7 +19,7 @@ class OllamaLLMProvider(LLMProvider):
     Calls a locally-hosted Ollama model via its HTTP API.
     """
 
-    def __init__(self, base_url: str, model_name: str = "deepseek-r1:8b"):
+    def __init__(self, base_url: str, model_name: str = "deepseek-r1:1.5b"):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
 

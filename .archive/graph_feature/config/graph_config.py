@@ -48,7 +48,7 @@ class GraphConfig(BaseSettings):
         description="Ollama API base URL"
     )
     ollama_model: str = Field(
-        default="deepseek-r1:8b",
+        default="deepseek-r1:1.5b",
         validation_alias="OLLAMA_MODEL",
         description="Ollama text model for entity/relationship extraction"
     )

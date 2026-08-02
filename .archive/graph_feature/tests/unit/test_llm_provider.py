@@ -133,7 +133,7 @@ class TestOllamaLLMProvider:
         """Test that generate_content POSTs to the Ollama generate endpoint."""
         provider = OllamaLLMProvider(
             base_url="http://localhost:11434",
-            model_name="deepseek-r1:8b"
+            model_name="deepseek-r1:1.5b"
         )
 
         mock_response = MagicMock()
@@ -151,7 +151,7 @@ class TestOllamaLLMProvider:
         assert response == {"response": "Ollama output"}
         mock_client.post.assert_called_once_with(
             "http://localhost:11434/api/generate",
-            json={"model": "deepseek-r1:8b", "prompt": "Test prompt", "stream": False}
+            json={"model": "deepseek-r1:1.5b", "prompt": "Test prompt", "stream": False}
         )
 
     @pytest.mark.asyncio
@@ -159,7 +159,7 @@ class TestOllamaLLMProvider:
         """Test that generate_content retries on HTTP error."""
         provider = OllamaLLMProvider(
             base_url="http://localhost:11434",
-            model_name="deepseek-r1:8b"
+            model_name="deepseek-r1:1.5b"
         )
 
         mock_response = MagicMock()
