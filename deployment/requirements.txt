@@ -56,6 +56,3 @@ langfuse>=2.7.0,<3.0.0  # Optional LLM-Ops UI — v2 API (observe decorator + la
 # Async task queue
 celery[redis]>=5.3.0
 redis>=5.0.0
-
-# PDF processing
-PyMuPDF>=1.23.0

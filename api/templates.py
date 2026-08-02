@@ -355,9 +355,8 @@ HOME_PAGE_HTML = """
             <div class="form-group">
                 <label>PDF Parsing Backend</label>
                 <select name="parse_backend" class="model-select">
-                    <option value="">Default (PyMuPDF only)</option>
-                    <option value="gemini-docling">Gemini Vision (docling)</option>
                     <option value="ollama">Local LLM — qwen3.5:4b (Ollama)</option>
+                    <option value="gemini-docling">Gemini Vision (docling)</option>
                 </select>
             </div>
             <div class="form-group">

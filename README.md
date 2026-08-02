@@ -13,7 +13,7 @@ input/raw/   one row per file,           (parser)  (chunker) (vector)  (PostgreS
 ```
 
 1. **Upload / scan** - drop a file via the API or the weekly scan. The raw file is saved in `input/raw/` and a status row is inserted into the `documents` table (`stage = registered`).
-2. **Parse** - a Celery worker claims the row, extracts text using the chosen backend (PyMuPDF, Docling + Ollama VLM, or Docling + Gemini Vision), and stores the parsed text in `document_parsed`.
+2. **Parse** - a Celery worker claims the row, extracts text using the chosen backend (Docling + Ollama VLM, or Docling + Gemini Vision), and stores the parsed text in `document_parsed`.
 3. **Chunk** - the parsed text is split into chunks; the result is stored in `document_chunked`.
 4. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in the existing `chunks` pgvector table.
 5. **Query** - a question triggers vector similarity search + BM25 reranking.
@@ -180,7 +180,7 @@ Upload and process a new document into the database.
 1. Click **📤 Embed**.
 2. Fill in the form:
    - **Document File** - select a PDF, DOCX, or TXT file
-   - **PDF Parsing Backend** - `Default (PyMuPDF only)` for speed; `Gemini Vision (docling)` or `Ollama VLM (docling)` for richer extraction of images and complex tables
+   - **PDF Parsing Backend** - `Local LLM (Ollama)` for local VLM extraction, or `Gemini Vision (docling)` for cloud-based extraction of images and complex tables
    - **Access Password** - required only if `APP_ACCESS_PASSWORD` is set
    - **Table Name** - target table in the database (default: `document_chunks`)
    - **Chunk Size** - token size per chunk (default: 512)
