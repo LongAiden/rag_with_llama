@@ -53,3 +53,5 @@ htmlcov/
 *.tmp
 *.bak
 .ipynb_checkpoints/
+
+celerybeat-schedule

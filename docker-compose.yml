@@ -14,7 +14,7 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1.5G
+          memory: 1G
         reservations:
           cpus: "0.5"
           memory: 512M
@@ -163,11 +163,11 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 3G
+          memory: 2.5G
         reservations:
           cpus: "0.5"
           memory: 512M
-    command: celery -A app.worker.celery_app worker -Q upload --loglevel=info -c 1
+    command: celery -A app.worker.celery_app worker -Q upload --loglevel=info -c 1 --max-tasks-per-child=1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -219,11 +219,11 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 2G
+          memory: 2.5G
         reservations:
           cpus: "0.5"
           memory: 512M
-    command: celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1
+    command: celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1 --max-tasks-per-child=1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -270,6 +270,10 @@ services:
         - rag_with_llama:latest
     image: rag_with_llama:latest
     container_name: rag_celery_beat
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     command: celery -A app.worker.celery_app beat --loglevel=info
     environment:
       POSTGRES_HOST: postgres

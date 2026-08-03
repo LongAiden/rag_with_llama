@@ -108,3 +108,4 @@ yarn-error.log
 *.backup
 *.old
 *.archive
+celerybeat-schedule

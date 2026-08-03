@@ -39,6 +39,7 @@ async def _execute_traced_search(
     get_pipeline,
     enable_reranking: bool = True,
     rerank_top_k: int = 5,
+    search_mode: str = "vector",
 ) -> RAGResponse:
     """Shared search logic used by both JSON and form endpoints.
 
@@ -58,6 +59,7 @@ async def _execute_traced_search(
         session_id=session_id,
         enable_reranking=enable_reranking,
         rerank_top_k=rerank_top_k,
+        search_mode=search_mode,
     )
 
 
@@ -77,8 +79,6 @@ async def query_documents(
     """Query documents using pgvector similarity search + LLM generation."""
     require_access_password(x_app_password)
     table_name = (request.table_name or DEFAULT_TABLE_NAME).strip()
-    # Validate before get_pipeline: an invalid name is a 400, and rejecting it here
-    # avoids building a pipeline (which loads an embedding model) just to fail.
     validate_table_name(table_name)
     try:
         @observe(name="rag_query")
@@ -99,6 +99,7 @@ async def query_documents(
                 get_pipeline=get_pipeline,
                 enable_reranking=request.enable_reranking,
                 rerank_top_k=request.rerank_top_k or 5,
+                search_mode=request.search_mode,
             )
 
         result = await _run_search(request.query)
@@ -114,6 +115,7 @@ async def query_documents_form(
     threshold: float = Form(0.3),
     table_name: str = Form(DEFAULT_TABLE_NAME),
     model: str = Form("gemini-2.5-flash"),
+    search_mode: str = Form("vector"),
     access_password: Optional[str] = Form(None),
     config=Depends(get_config),
     get_pipeline=Depends(get_pipeline_factory),
@@ -137,6 +139,7 @@ async def query_documents_form(
                 get_pipeline=get_pipeline,
                 enable_reranking=True,
                 rerank_top_k=5,
+                search_mode=search_mode,
             )
 
         result = await _run_search(query)

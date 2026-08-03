@@ -357,7 +357,7 @@ async def _recover_and_dispatch() -> Dict[str, Any]:
     config = _get_config()
     repo = _get_repo(config)
 
-    stale = await repo.reset_stale_claims(CLAIM_TIMEOUT_MINUTES)
+    stale = await repo.reset_stale_claims(CLAIM_TIMEOUT_MINUTES, MAX_ATTEMPTS)
     retried = await repo.reset_error_documents(MAX_ATTEMPTS)
     dispatched = await _dispatch_pending(repo)
 
@@ -377,7 +377,7 @@ async def _register_and_dispatch() -> Dict[str, Any]:
     config = _get_config()
     repo = _get_repo(config)
 
-    stale = await repo.reset_stale_claims(CLAIM_TIMEOUT_MINUTES)
+    stale = await repo.reset_stale_claims(CLAIM_TIMEOUT_MINUTES, MAX_ATTEMPTS)
     retried = await repo.reset_error_documents(MAX_ATTEMPTS)
     registered = await _scan_input_dir(repo)
     dispatched = await _dispatch_pending(repo)

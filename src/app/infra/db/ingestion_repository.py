@@ -268,19 +268,31 @@ class IngestionRepository:
             )
             return dict(row) if row else {}
 
-    async def reset_stale_claims(self, timeout_minutes: int = 30) -> int:
-        """Reset documents stuck in a processing stage for longer than the timeout."""
+    async def reset_stale_claims(self, timeout_minutes: int = 30, max_attempts: int = 2) -> int:
+        """Reset documents stuck in a processing stage for longer than the timeout.
+        
+        Increments attempts and moves to 'failed' if max_attempts is reached,
+        preventing infinite re-dispatch loops when workers are killed (e.g., OOM).
+        """
         pool = await self._get_pool()
         timeout = timedelta(minutes=timeout_minutes)
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
                 UPDATE documents
-                SET stage = CASE stage
-                        WHEN 'parsing' THEN 'registered'
-                        WHEN 'chunking' THEN 'parsed'
-                        WHEN 'embedding' THEN 'chunked'
-                        ELSE stage
+                SET attempts = attempts + 1,
+                    stage = CASE
+                        WHEN attempts + 1 >= $2 THEN 'failed'
+                        ELSE CASE stage
+                            WHEN 'parsing' THEN 'registered'
+                            WHEN 'chunking' THEN 'parsed'
+                            WHEN 'embedding' THEN 'chunked'
+                            ELSE stage
+                        END
+                    END,
+                    last_error = CASE
+                        WHEN attempts + 1 >= $2 THEN 'Worker killed (stale claim exceeded max attempts)'
+                        ELSE last_error
                     END,
                     claimed_at = NULL,
                     claimed_by = NULL,
@@ -289,6 +301,7 @@ class IngestionRepository:
                   AND claimed_at < NOW() - $1::interval
                 """,
                 timeout,
+                max_attempts,
             )
         return _parse_count(result)
 

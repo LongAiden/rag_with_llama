@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 
@@ -13,6 +13,10 @@ class QueryRequest(BaseModel):
     model: str = Field(default="deepseek-r1:1.5b", description="LLM model to use for response generation")
     table_name: str = Field(default="document_chunks", description="Database table to search")
     session_id: Optional[str] = Field(None, description="Optional session identifier for grouping interactions")
+    search_mode: Literal["vector", "hybrid"] = Field(
+        default="vector",
+        description="Search mode: 'vector' for vector-only (faster), 'hybrid' for vector+BM25+RRF"
+    )
 
 
 class UploadResponse(BaseModel):

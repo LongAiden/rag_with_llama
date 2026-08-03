@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,8 @@ from app.ingestion.processors.gemini_docling_parser import (
     _clean_html,
     _fix_table_closing_tags,
     _fix_markdown_headings,
+    _DOCLING_PAGE_BATCH_SIZE,
+    _VLM_CONCURRENCY,
 )
 from app.ingestion.processors.prompts import (
     VLM_IMAGE_PROMPT as _VLM_IMAGE_PROMPT,
@@ -33,9 +36,8 @@ class OllamaPDFParser(GeminiDoclingParser):
     Ollama vision model for complex tables and figures.
 
     Key differences from GeminiDoclingParser:
-    - _is_complex_table: AND instead of OR — prevents narrow tall tables (e.g. ToC) from going to VLM
     - _call_vlm: routes to Ollama with simpler prompts + fallback on failure
-    - parse_pdf: page-by-page; heading levels are assigned via bbox height (inherited from base)
+    - parse_pdf: page-batched conversion; heading levels are assigned via bbox height (inherited from base)
     """
 
     def __init__(
@@ -43,7 +45,7 @@ class OllamaPDFParser(GeminiDoclingParser):
         ollama_base_url: str = "http://localhost:11434",
         vlm_model: str = "qwen3.5:0.8b",
         vlm_timeout: float = 300.0,
-        images_scale: float = 0.75,
+        images_scale: float = 0.6,
         complex_table_rows: int = 8,
         complex_table_cols: int = 6,
         max_pages: Optional[int] = None,
@@ -72,21 +74,7 @@ class OllamaPDFParser(GeminiDoclingParser):
     def get_backend_name(self) -> str:
         return "ollama-docling"
 
-    # ── Fix 1: AND instead of OR so narrow tall tables (ToC) stay in Docling ─
-
-    def _is_complex_table(self, table) -> bool:
-        try:
-            return (
-                table.data.num_rows > self._complex_table_rows
-                and table.data.num_cols > self._complex_table_cols
-            )
-        except Exception:
-            return False
-
-    # ── Fix 2: Ollama VLM call with prompt remapping and fallback ─────────────
-
     def _call_vlm(self, pil_img: PILImage.Image, prompt: str) -> str:
-        # Remap Gemini-tuned prompts to simpler Ollama-friendly versions
         if prompt is _VLM_IMAGE_PROMPT or prompt == _VLM_IMAGE_PROMPT:
             prompt = _OLLAMA_IMAGE_PROMPT
         elif prompt is _VLM_TABLE_PROMPT or prompt == _VLM_TABLE_PROMPT:
@@ -130,25 +118,38 @@ class OllamaPDFParser(GeminiDoclingParser):
             logger.warning(f"VLM call failed ({type(exc).__name__}: {exc}) — falling back to [IMAGE]")
             return "[IMAGE]"
 
-    # ── Fix 3: page-by-page with heading level shift ──────────────────────────
-
     def parse_pdf(self, path, output_path=None) -> str:
-        """Parse PDF using single-pass Docling conversion + Ollama VLM for images/tables."""
+        """Parse PDF using page-batched Docling conversion + Ollama VLM for images/tables."""
         self._vlm_calls = 0
         pdf_path = str(path)
 
-        logger.info(f"Docling converting (single pass): {Path(pdf_path).name}")
-        conv = self._build_converter().convert(pdf_path)
-        doc = conv.document
-
-        page_items: dict[int, list] = defaultdict(list)
-        for item, _ in doc.iterate_items():
-            if item.prov:
-                page_items[item.prov[0].page_no].append(item)
-
-        total_pages = len(doc.pages)
+        total_pages = self._count_pages(pdf_path)
         if self._max_pages is not None:
             total_pages = min(total_pages, self._max_pages)
+        
+        logger.info(f"Docling converting (page-batched): {Path(pdf_path).name}, {total_pages} pages")
+        
+        converter = self._build_converter()
+        batch_docs = {}
+        
+        for batch_start in range(1, total_pages + 1, _DOCLING_PAGE_BATCH_SIZE):
+            batch_end = min(batch_start + _DOCLING_PAGE_BATCH_SIZE - 1, total_pages)
+            logger.info(f"  Converting pages {batch_start}-{batch_end}...")
+            
+            conv = converter.convert(pdf_path, page_range=(batch_start, batch_end))
+            doc = conv.document
+            batch_docs[(batch_start, batch_end)] = doc
+        
+        page_items: dict[int, list] = defaultdict(list)
+        page_doc_map: dict[int, any] = {}
+        
+        for (batch_start, batch_end), doc in batch_docs.items():
+            for item, _ in doc.iterate_items():
+                if item.prov:
+                    page_no = item.prov[0].page_no
+                    page_items[page_no].append(item)
+                    page_doc_map[page_no] = doc
+
         logger.info(f"Assembling {total_pages} pages with Ollama VLM ({self._vlm_model})")
 
         pages_md = []
@@ -158,27 +159,34 @@ class OllamaPDFParser(GeminiDoclingParser):
             out_file = open(output_path, "w", encoding="utf-8")
 
         try:
-            for page_no in range(1, total_pages + 1):
-                print(f"[{page_no}/{total_pages}] assembling … ", end="", flush=True)
-                try:
-                    page_md = self._process_page(
-                        page_no=page_no,
-                        items=page_items.get(page_no, []),
-                        doc=doc,
-                    )
-                    page_md = _normalize_tables_in_markdown(page_md)
-                    page_md = _clean_html(page_md)
-                    page_md = _fix_table_closing_tags(page_md)
+            with ThreadPoolExecutor(max_workers=_VLM_CONCURRENCY) as executor:
+                for page_no in range(1, total_pages + 1):
+                    print(f"[{page_no}/{total_pages}] assembling … ", end="", flush=True)
+                    try:
+                        doc = page_doc_map.get(page_no)
+                        if not doc:
+                            logger.warning(f"  p{page_no}: no document found, skipping")
+                            continue
+                        
+                        page_md = self._process_page(
+                            page_no=page_no,
+                            items=page_items.get(page_no, []),
+                            doc=doc,
+                            executor=executor
+                        )
+                        page_md = _normalize_tables_in_markdown(page_md)
+                        page_md = _clean_html(page_md)
+                        page_md = _fix_table_closing_tags(page_md)
 
-                    chunk = page_md + "\n\n---\n\n"
-                    pages_md.append(chunk)
-                    if out_file:
-                        out_file.write(chunk)
-                        out_file.flush()
-                    print("done")
-                except Exception as exc:
-                    print(f"ERROR: {exc}")
-                    logger.error(f"[page {page_no}] {exc}", exc_info=True)
+                        chunk = page_md + "\n\n---\n\n"
+                        pages_md.append(chunk)
+                        if out_file:
+                            out_file.write(chunk)
+                            out_file.flush()
+                        print("done")
+                    except Exception as exc:
+                        print(f"ERROR: {exc}")
+                        logger.error(f"[page {page_no}] {exc}", exc_info=True)
         finally:
             if out_file:
                 out_file.close()

@@ -2,6 +2,7 @@ import re
 import time
 import logging
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RPM_LIMIT = 10
 _DEFAULT_COMPLEX_TABLE_ROWS = 8
 _DEFAULT_COMPLEX_TABLE_COLS = 6
-_DEFAULT_IMAGES_SCALE = 1.0
+_DEFAULT_IMAGES_SCALE = 0.75
+_DEFAULT_MIN_IMAGE_PX = 150
+_DOCLING_PAGE_BATCH_SIZE = 50
+_VLM_CONCURRENCY = 2
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
@@ -268,7 +272,7 @@ class GeminiDoclingParser(PDFParserBase):
         h1_min_height: float = 20.0,
         h2_min_height: float = 11.0,
         h3_min_height: float = 9.0,
-        min_image_px: int = 0,
+        min_image_px: int = _DEFAULT_MIN_IMAGE_PX,
     ):
         self._api_key = api_key
         self._gemini_model = gemini_model
@@ -299,7 +303,7 @@ class GeminiDoclingParser(PDFParserBase):
         opts.do_table_structure = True
         opts.table_structure_options = TableStructureOptions(do_cell_matching=True)
         opts.accelerator_options = AcceleratorOptions(
-            num_threads=4, device=AcceleratorDevice.AUTO
+            num_threads=2, device=AcceleratorDevice.AUTO
         )
         opts.generate_page_images = True
         opts.generate_picture_images = True
@@ -352,7 +356,7 @@ class GeminiDoclingParser(PDFParserBase):
         try:
             return (
                 table.data.num_rows > self._complex_table_rows
-                or table.data.num_cols > self._complex_table_cols
+                and table.data.num_cols > self._complex_table_cols
             )
         except Exception:
             return False
@@ -417,10 +421,9 @@ class GeminiDoclingParser(PDFParserBase):
             return None
         return pil_full.crop((pix_l, pix_t, pix_r, pix_b))
 
-    def _process_page(self, page_no: int, items: list, doc) -> str:
+    def _process_page(self, page_no: int, items: list, doc, executor: Optional[ThreadPoolExecutor] = None) -> str:
         from docling_core.types.doc import TableItem, PictureItem, TextItem, SectionHeaderItem
 
-        # Detect two-column layout for this page
         page = doc.pages.get(page_no)
         page_width = page.size.width if page and page.size else None
         split_x = _detect_column_split(items, page_width) if page_width else None
@@ -431,7 +434,6 @@ class GeminiDoclingParser(PDFParserBase):
             cx = (item.prov[0].bbox.l + item.prov[0].bbox.r) / 2
             return 0 if cx <= split_x else 1
 
-        # Pre-pass: find text items absorbed into adjacent picture crops
         adjacent_texts: dict = {}
         skip_ids: set = set()
         for item in items:
@@ -443,6 +445,8 @@ class GeminiDoclingParser(PDFParserBase):
                 skip_ids.update(id(t) for t in band)
 
         ordered: list = []
+        vlm_tasks: list[tuple[int, int, int, any]] = []
+        
         for item in items:
             if not item.prov:
                 continue
@@ -470,7 +474,13 @@ class GeminiDoclingParser(PDFParserBase):
                     print(f"  p{page_no}: {label} too small ({pil.width}×{pil.height}px < {self._min_image_px}px), skipping VLM", flush=True)
                     continue
                 print(f"  p{page_no}: {label} ({pil.width}×{pil.height}px) → VLM", flush=True)
-                md = self._call_vlm(pil, _VLM_IMAGE_PROMPT).strip()
+                
+                if executor:
+                    future = executor.submit(self._call_vlm, pil, _VLM_IMAGE_PROMPT)
+                    vlm_tasks.append((col, y, x, future))
+                else:
+                    md = self._call_vlm(pil, _VLM_IMAGE_PROMPT).strip()
+                    ordered.append((col, y, x, md))
 
             elif isinstance(item, TableItem) and self._is_complex_table(item):
                 pil = item.get_image(doc)
@@ -481,15 +491,22 @@ class GeminiDoclingParser(PDFParserBase):
                     except Exception:
                         md = str(item.data)
                     md = f"<table>\n\n{md}\n\n</table>"
+                    ordered.append((col, y, x, md))
                 else:
                     print(
                         f"  p{page_no}: complex table "
                         f"({item.data.num_rows}×{item.data.num_cols}, "
                         f"{pil.width}×{pil.height}px) → VLM", flush=True
                     )
-                    md = self._call_vlm(pil, _VLM_TABLE_PROMPT).strip()
-                    if not md.startswith("<table>"):
-                        md = f"<table>\n\n{md}\n\n</table>"
+                    
+                    if executor:
+                        future = executor.submit(self._call_vlm, pil, _VLM_TABLE_PROMPT)
+                        vlm_tasks.append((col, y, x, future))
+                    else:
+                        md = self._call_vlm(pil, _VLM_TABLE_PROMPT).strip()
+                        if not md.startswith("<table>"):
+                            md = f"<table>\n\n{md}\n\n</table>"
+                        ordered.append((col, y, x, md))
 
             elif isinstance(item, TableItem):
                 logger.debug(f"  p{page_no}: simple table ({item.data.num_rows}×{item.data.num_cols}) → Docling")
@@ -501,10 +518,9 @@ class GeminiDoclingParser(PDFParserBase):
                     except Exception:
                         md = str(item.data)
                 md = f"<table>\n\n{md}\n\n</table>"
+                ordered.append((col, y, x, md))
 
             elif isinstance(item, SectionHeaderItem):
-                # Use bbox height as font-size proxy to assign heading level.
-                # Docling often flattens all headers to level=1; height is more reliable.
                 bbox_height = item.prov[0].bbox.t - item.prov[0].bbox.b
                 if bbox_height > self._h1_min_height:
                     prefix = "#"
@@ -513,24 +529,33 @@ class GeminiDoclingParser(PDFParserBase):
                 elif bbox_height > self._h3_min_height:
                     prefix = "###"
                 else:
-                    # Too small to be a heading — emit as body text to suppress
-                    # false positives (e.g. inline styled "Constant width" labels).
                     md = (item.text or "").strip()
                     if not md:
                         continue
                     ordered.append((col, y, x, md))
                     continue
                 md = f"{prefix} {item.text}"
+                ordered.append((col, y, x, md))
 
             elif isinstance(item, TextItem):
                 md = (item.text or "").strip()
                 if not md:
                     continue
+                ordered.append((col, y, x, md))
 
             else:
                 continue
 
-            ordered.append((col, y, x, md))
+        if vlm_tasks:
+            for col, y, x, future in vlm_tasks:
+                try:
+                    md = future.result().strip()
+                    if not md.startswith("<table>") and any(isinstance(item, TableItem) for item in items if item.prov and self._item_sort_key(item) == (y, x)):
+                        md = f"<table>\n\n{md}\n\n</table>"
+                    ordered.append((col, y, x, md))
+                except Exception as exc:
+                    logger.error(f"VLM call failed: {exc}")
+                    ordered.append((col, y, x, "[IMAGE]"))
 
         ordered.sort(key=lambda t: (t[0], t[1], t[2]))
         body = "\n\n".join(md for _, _, _, md in ordered)
@@ -539,23 +564,39 @@ class GeminiDoclingParser(PDFParserBase):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def parse_pdf(self, path: str | Path, output_path: Optional[str | Path] = None) -> str:
-        """Parse a PDF to markdown using Docling + Gemini."""
+        """Parse a PDF to markdown using Docling + Gemini with page-batched conversion."""
         self._vlm_calls = 0
         pdf_path = str(path)
 
         logger.info(f"═══ GeminiDoclingParser: {Path(pdf_path).name} ═══")
 
-        logger.info("Step 1/3  Docling converting …")
-        conv = self._build_converter().convert(pdf_path)
-        doc = conv.document
+        total_pages = self._count_pages(pdf_path)
+        logger.info(f"Total pages: {total_pages}, batch size: {_DOCLING_PAGE_BATCH_SIZE}")
 
+        converter = self._build_converter()
+        
+        logger.info("Step 1/3  Docling converting (page-batched) …")
+        batch_docs = {}
+        
+        for batch_start in range(1, total_pages + 1, _DOCLING_PAGE_BATCH_SIZE):
+            batch_end = min(batch_start + _DOCLING_PAGE_BATCH_SIZE - 1, total_pages)
+            logger.info(f"  Converting pages {batch_start}-{batch_end}...")
+            
+            conv = converter.convert(pdf_path, page_range=(batch_start, batch_end))
+            doc = conv.document
+            batch_docs[(batch_start, batch_end)] = doc
+        
         logger.info("Step 2/3  Grouping elements by page …")
         page_items: dict[int, list] = defaultdict(list)
-        for item, _level in doc.iterate_items():
-            if item.prov:
-                page_items[item.prov[0].page_no].append(item)
+        page_doc_map: dict[int, any] = {}
+        
+        for (batch_start, batch_end), doc in batch_docs.items():
+            for item, _level in doc.iterate_items():
+                if item.prov:
+                    page_no = item.prov[0].page_no
+                    page_items[page_no].append(item)
+                    page_doc_map[page_no] = doc
 
-        total_pages = len(doc.pages)
         total_items = sum(len(v) for v in page_items.values())
         logger.info(f"{total_pages} pages, {total_items} elements")
 
@@ -568,22 +609,33 @@ class GeminiDoclingParser(PDFParserBase):
             out_file = open(output_path, "w", encoding="utf-8")
 
         try:
-            for page_no in range(1, total_pages + 1):
-                print(f"[{page_no}/{total_pages}] … ", end="", flush=True)
-                try:
-                    page_md = self._process_page(page_no=page_no, items=page_items.get(page_no, []), doc=doc)
-                    page_md = _normalize_tables_in_markdown(page_md)
-                    page_md = _clean_html(page_md)
-                    page_md = _fix_table_closing_tags(page_md)
-                    chunk = page_md + "\n\n---\n\n"
-                    pages_md.append(chunk)
-                    if out_file:
-                        out_file.write(chunk)
-                        out_file.flush()
-                    print("done")
-                except Exception as exc:
-                    print(f"ERROR: {exc}")
-                    logger.error(f"[page {page_no}] {exc}", exc_info=True)
+            with ThreadPoolExecutor(max_workers=_VLM_CONCURRENCY) as executor:
+                for page_no in range(1, total_pages + 1):
+                    print(f"[{page_no}/{total_pages}] … ", end="", flush=True)
+                    try:
+                        doc = page_doc_map.get(page_no)
+                        if not doc:
+                            logger.warning(f"  p{page_no}: no document found, skipping")
+                            continue
+                        
+                        page_md = self._process_page(
+                            page_no=page_no,
+                            items=page_items.get(page_no, []),
+                            doc=doc,
+                            executor=executor
+                        )
+                        page_md = _normalize_tables_in_markdown(page_md)
+                        page_md = _clean_html(page_md)
+                        page_md = _fix_table_closing_tags(page_md)
+                        chunk = page_md + "\n\n---\n\n"
+                        pages_md.append(chunk)
+                        if out_file:
+                            out_file.write(chunk)
+                            out_file.flush()
+                        print("done")
+                    except Exception as exc:
+                        print(f"ERROR: {exc}")
+                        logger.error(f"[page {page_no}] {exc}", exc_info=True)
         finally:
             if out_file:
                 out_file.close()

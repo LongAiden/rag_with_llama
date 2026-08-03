@@ -42,6 +42,7 @@ async def perform_document_search(
     session_id: Optional[str] = None,
     enable_reranking: bool = True,
     rerank_top_k: int = 5,
+    search_mode: str = "vector",
 ) -> RAGResponse:
     """
     Common document search logic with optional reranking.
@@ -54,11 +55,11 @@ async def perform_document_search(
         config: Application configuration object
         document_ids: Optional list of document IDs to filter by
         table_name: Database table name
+        search_mode: "vector" for vector-only, "hybrid" for vector+BM25+RRF
 
     Returns:
         RAGResponse with answer, sources, and metadata
     """
-    # Attach session_id to the active Langfuse trace (created by the route wrapper)
     if session_id:
         langfuse_context.update_current_trace(
             session_id=session_id,
@@ -66,12 +67,12 @@ async def perform_document_search(
         )
 
     with logfire.span("document_search",
-                     query=query[:100],  # Truncate long queries for logging
+                     query=query[:100],
                      limit=limit,
                      threshold=threshold,
-                     table_name=table_name):
+                     table_name=table_name,
+                     search_mode=search_mode):
 
-        # Step 1: pgvector similarity search (semantic retrieval)
         HYBRID_LIMIT = 20
         with logfire.span("embedding_generation_for_search"):
             logfire.info("Generating embeddings for search query",
@@ -89,21 +90,21 @@ async def perform_document_search(
                         results_found=len(vector_results),
                         avg_similarity=sum(r['similarity'] for r in vector_results) / len(vector_results) if vector_results else 0)
 
-        # Step 2: BM25 search (lexical retrieval)
-        with logfire.span("bm25_retrieval"):
-            bm25_results = await pipeline.vector_store.search_bm25(
-                query=query,
-                limit=HYBRID_LIMIT,
-                document_ids=document_ids,
-            )
-            logfire.info("BM25 search completed", results_found=len(bm25_results))
+        if search_mode == "hybrid":
+            with logfire.span("bm25_retrieval"):
+                bm25_results = await pipeline.vector_store.search_bm25(
+                    query=query,
+                    limit=HYBRID_LIMIT,
+                    document_ids=document_ids,
+                )
+                logfire.info("BM25 search completed", results_found=len(bm25_results))
 
-        # Step 3: RRF merge of vector + BM25 results
-        with logfire.span("rrf_merge"):
-            merged_results = merge_with_rrf(vector_results, bm25_results)
-            logfire.info("RRF merge completed", merged_count=len(merged_results))
+            with logfire.span("rrf_merge"):
+                merged_results = merge_with_rrf(vector_results, bm25_results)
+                logfire.info("RRF merge completed", merged_count=len(merged_results))
+        else:
+            merged_results = vector_results
 
-        # Step 4: Cross-encoder reranking (if enabled)
         avg_rerank_score = None
         reranking_enabled = enable_reranking
 
@@ -111,8 +112,6 @@ async def perform_document_search(
             with logfire.span("cross_encoder_reranking"):
                 try:
                     from app.retrieval.utils import get_reranker
-                    # Both the first-call CrossEncoder load and every rerank are
-                    # synchronous and CPU-bound — run them in a worker thread.
                     reranker = await asyncio.to_thread(get_reranker, config)
                     original_by_id = {r['chunk_id']: r for r in merged_results}
                     reranked = await asyncio.to_thread(
@@ -136,13 +135,17 @@ async def perform_document_search(
                                final_results=len(merged_results),
                                avg_rerank_score=avg_rerank_score)
                 except Exception as e:
-                    logfire.error("Cross-encoder reranking failed, using RRF scores only", error=str(e))
+                    logfire.error("Cross-encoder reranking failed, using vector scores only", error=str(e))
                     reranking_enabled = False
                     merged_results = merged_results[:rerank_top_k]
         else:
             merged_results = merged_results[:limit]
 
         results = merged_results
+
+        search_method = "vector" + ("_crossencoder" if reranking_enabled else "")
+        if search_mode == "hybrid":
+            search_method = "hybrid_bm25_vector" + ("_crossencoder" if reranking_enabled else "")
 
         if not results:
             no_results_msg = "No relevant documents found with the specified similarity threshold."
@@ -153,7 +156,7 @@ async def perform_document_search(
                 search_stats=RAGResponseMetadata(
                     chunks_found=0,
                     avg_similarity=0.0,
-                    search_method="hybrid_bm25_vector" + ("_crossencoder" if reranking_enabled else ""),
+                    search_method=search_method,
                     threshold_used=threshold,
                     word_count=len(no_results_msg.split()),
                     confidence=0.0,
@@ -163,7 +166,6 @@ async def perform_document_search(
                 table_used=table_name
             )
 
-        # Step 1.6: Sibling expansion for structural queries (how many, list all, count…)
         _STRUCTURAL_RE = re.compile(
             r'\b(how many|list all|all the|count|enumerate|what are the|steps in|'
             r'number of|how much|summarize all|every)\b',
@@ -190,14 +192,11 @@ async def perform_document_search(
             logfire.info("Sibling expansion",
                          sections_expanded=len(section_context_blocks))
 
-        # Step 2: Build context from retrieved chunks with page numbers and full page content
         with logfire.span("context_building"):
             context_parts = []
 
-            # Prepend section context blocks so the LLM sees complete sections first
             context_parts.extend(section_context_blocks)
 
-            # Track which page contexts have already been included to avoid duplicates
             seen_page_contexts: set = set()
 
             for i, result in enumerate(results):
@@ -209,8 +208,6 @@ async def perform_document_search(
                 chunk_text = result['text']
                 page_content = (result.get('metadata') or {}).get('page_content', '')
 
-                # Include the full page context block only when it adds new information
-                # and we haven't already emitted the same page context for this document
                 doc_id = result.get('document_id', '')
                 page_key = (doc_id, page_num if page_num is not None else 'no_page')
                 if (
@@ -235,17 +232,12 @@ async def perform_document_search(
                         total_context_parts=len(context_parts),
                         context_length=len(context))
 
-        # Step 3: Generate response with LLM
         t0 = time.monotonic()
         llm_response = await generate_llm_response(query, context, results, model=model)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
-        # Calculate search statistics
         avg_similarity = sum(r['similarity'] for r in results) / len(results)
 
-        # Fire-and-forget: persist interaction to llm_interactions table (and Langfuse if configured).
-        # The task is kept in _BACKGROUND_TASKS until it finishes — asyncio only holds a
-        # weak reference, so an unreferenced task can be garbage-collected mid-flight.
         _task = asyncio.create_task(log_interaction(
             InteractionPayload(
                 question=query,
@@ -255,7 +247,7 @@ async def perform_document_search(
                 latency_ms=latency_ms,
                 sources_used=len(results),
                 table_name=table_name,
-                rerank_method="cross_encoder" if reranking_enabled else "rrf_only",
+                rerank_method="cross_encoder" if reranking_enabled else "vector_only",
                 input_tokens=llm_response.input_tokens,
                 output_tokens=llm_response.output_tokens,
                 total_tokens=llm_response.total_tokens,
@@ -266,7 +258,6 @@ async def perform_document_search(
         _BACKGROUND_TASKS.add(_task)
         _task.add_done_callback(_BACKGROUND_TASKS.discard)
 
-        # Create structured response
         return RAGResponse(
             query=query,
             answer=llm_response.answer,
@@ -286,7 +277,7 @@ async def perform_document_search(
             search_stats=RAGResponseMetadata(
                 chunks_found=len(results),
                 avg_similarity=round(avg_similarity, 3),
-                search_method="hybrid_bm25_vector" + ("_crossencoder" if reranking_enabled else ""),
+                search_method=search_method,
                 threshold_used=threshold,
                 word_count=llm_response.word_count,
                 confidence=llm_response.confidence,
