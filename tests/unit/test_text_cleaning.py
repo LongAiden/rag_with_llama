@@ -14,7 +14,7 @@ import sys
 import pytest
 from pathlib import Path
 
-from ingestion.text_cleaning.cleaners import (
+from app.ingestion.text_cleaning.cleaners import (
     TextCleaningStrategy,
     SurrogateRemovalStrategy,
     MathNotationNormalizer,

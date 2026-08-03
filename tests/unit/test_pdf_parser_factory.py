@@ -10,7 +10,7 @@ Covers:
 import pytest
 from unittest.mock import MagicMock, patch
 
-from ingestion.processors.pdf_parser_factory import create_pdf_parser
+from app.ingestion.processors.pdf_parser_factory import create_pdf_parser
 
 
 @pytest.fixture
@@ -25,14 +25,14 @@ def mock_settings():
 
 class TestCreatePdfParser:
     def test_ollama_backend(self, mock_settings):
-        with patch('ingestion.processors.pdf_parser_factory.OllamaPDFParser', create=True):
-            with patch('ingestion.processors.ollama_pdf_parser.OllamaPDFParser') as mock_cls:
+        with patch('app.ingestion.processors.pdf_parser_factory.OllamaPDFParser', create=True):
+            with patch('app.ingestion.processors.ollama_pdf_parser.OllamaPDFParser') as mock_cls:
                 mock_cls.return_value = MagicMock()
                 parser = create_pdf_parser("ollama", mock_settings)
                 assert parser is not None
 
     def test_gemini_docling_backend(self, mock_settings):
-        with patch('ingestion.processors.gemini_docling_parser.GeminiDoclingParser') as mock_cls:
+        with patch('app.ingestion.processors.gemini_docling_parser.GeminiDoclingParser') as mock_cls:
             mock_cls.return_value = MagicMock()
             parser = create_pdf_parser("gemini-docling", mock_settings)
             assert parser is not None
@@ -48,7 +48,7 @@ class TestCreatePdfParser:
             create_pdf_parser("unknown-backend", mock_settings)
 
     def test_ollama_passes_correct_params(self, mock_settings):
-        with patch('ingestion.processors.ollama_pdf_parser.OllamaPDFParser') as mock_cls:
+        with patch('app.ingestion.processors.ollama_pdf_parser.OllamaPDFParser') as mock_cls:
             mock_cls.return_value = MagicMock()
             create_pdf_parser("ollama", mock_settings)
             mock_cls.assert_called_once_with(
@@ -57,7 +57,7 @@ class TestCreatePdfParser:
             )
 
     def test_gemini_passes_correct_params(self, mock_settings):
-        with patch('ingestion.processors.gemini_docling_parser.GeminiDoclingParser') as mock_cls:
+        with patch('app.ingestion.processors.gemini_docling_parser.GeminiDoclingParser') as mock_cls:
             mock_cls.return_value = MagicMock()
             create_pdf_parser("gemini-docling", mock_settings)
             mock_cls.assert_called_once_with(

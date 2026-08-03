@@ -12,13 +12,13 @@ import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
-from ingestion.processors.processor_factory import (
+from app.ingestion.processors.processor_factory import (
     ProcessorRegistry,
     get_registry,
     get_processor_for_file,
     _global_registry,
 )
-import ingestion.processors.processor_factory as pf_module
+import app.ingestion.processors.processor_factory as pf_module
 
 
 class TestProcessorRegistry:

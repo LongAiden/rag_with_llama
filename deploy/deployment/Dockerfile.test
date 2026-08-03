@@ -1,0 +1,47 @@
+# ============================================
+# Test Environment Dockerfile
+# Uses the base image for faster builds
+# ============================================
+
+ARG PYTHON_VERSION=3.11
+
+FROM rag-base:latest
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app:/app/src
+
+WORKDIR /app
+
+# Application dependencies. The base image only carries the heavy ML packages,
+# so without this the suite cannot even import conftest (no dotenv, fastapi, ...).
+COPY deploy/deployment/requirements.txt .
+RUN pip install --no-cache-dir --prefer-binary \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        -r requirements.txt && \
+    pip uninstall -y opencv-python 2>/dev/null || true && \
+    pip install --no-cache-dir opencv-python-headless
+
+# Install test dependencies
+RUN pip install --no-cache-dir \
+    pytest>=7.4.0 \
+    pytest-asyncio>=0.21.0 \
+    pytest-cov>=4.1.0 \
+    pytest-mock>=3.11.0 \
+    reportlab>=4.0.0
+
+# Copy application code and the pytest config that puts src/ on the path
+COPY src/ ./src/
+COPY deploy/migrations/ ./deploy/migrations/
+COPY docs/images/ ./docs/images/
+COPY pytest.ini ./pytest.ini
+
+# Note: tests/ directory will be mounted as a volume in docker-compose
+# This allows for live test development without rebuilding the image
+
+# Create required directories
+RUN mkdir -p /app/data/parsed /app/data/chunks /app/logs /app/input/raw /app/htmlcov /app/tests
+
+# Default command runs all tests
+CMD ["pytest", "-v", "--cov=app", "--cov-report=html", "--cov-report=term"]

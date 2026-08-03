@@ -17,7 +17,7 @@ def _make_app():
     """Build a minimal FastAPI app with only the delete route wired up."""
     from fastapi import FastAPI, Header
     from typing import Optional
-    from api.routes.table_routes import delete_table
+    from app.api.routes.table_routes import delete_table
 
     app = FastAPI()
 

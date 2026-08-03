@@ -5,7 +5,7 @@ services:
   postgres:
     build:
       context: .
-      dockerfile: deployment/Dockerfile.postgres
+      dockerfile: deploy/deployment/Dockerfile.postgres
       cache_from:
         - rag_postgres:latest
     image: rag_postgres:latest
@@ -29,7 +29,7 @@ services:
       # Persistent data storage
       - postgres_data:/var/lib/postgresql/data
       # Initialization scripts (migrations)
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./deploy/migrations:/docker-entrypoint-initdb.d:ro
     networks:
       - rag_network
     healthcheck:
@@ -68,7 +68,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
@@ -100,19 +100,8 @@ services:
       LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
       LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
 
-      # Graph Configuration
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
-      ENTITY_CONFIDENCE_THRESHOLD: ${ENTITY_CONFIDENCE_THRESHOLD:-0.6}
-      RELATIONSHIP_CONFIDENCE_THRESHOLD: ${RELATIONSHIP_CONFIDENCE_THRESHOLD:-0.6}
-      MAX_ENTITIES_PER_CHUNK: ${MAX_ENTITIES_PER_CHUNK:-50}
-      MAX_RELATIONSHIPS_PER_CHUNK: ${MAX_RELATIONSHIPS_PER_CHUNK:-100}
-      DEFAULT_MAX_HOPS: ${DEFAULT_MAX_HOPS:-2}
+      # LLM
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-
-      # Performance
-      BATCH_SIZE: ${BATCH_SIZE:-10}
-      ENABLE_PARALLEL_EXTRACTION: ${ENABLE_PARALLEL_EXTRACTION:-true}
-      ENABLE_ENTITY_CACHING: ${ENABLE_ENTITY_CACHING:-true}
 
       # Langfuse observability (optional — leave blank to disable)
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
@@ -124,11 +113,13 @@ services:
       # Celery broker/backend + optional FE password
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-}
 
       # Ingestion settings
       INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      PARSED_DIR: ${PARSED_DIR:-data/parsed}
+      CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
+      PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
       INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
@@ -163,7 +154,7 @@ services:
   celery_worker_upload:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
@@ -176,7 +167,7 @@ services:
         reservations:
           cpus: "0.5"
           memory: 512M
-    command: celery -A worker.celery_app worker -Q upload --loglevel=info -c 1
+    command: celery -A app.worker.celery_app worker -Q upload --loglevel=info -c 1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -188,13 +179,14 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:1.5b}
       OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:0.8b}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      PARSED_DIR: ${PARSED_DIR:-data/parsed}
+      CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
+      PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
       INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
@@ -218,7 +210,7 @@ services:
   celery_worker_ingestion:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
@@ -231,7 +223,7 @@ services:
         reservations:
           cpus: "0.5"
           memory: 512M
-    command: celery -A worker.celery_app worker -Q ingestion --loglevel=info -c 1
+    command: celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -243,13 +235,14 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:1.5b}
       OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:0.8b}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      PARSED_DIR: ${PARSED_DIR:-data/parsed}
+      CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
+      PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
       INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
@@ -272,12 +265,12 @@ services:
   celery_beat:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
     container_name: rag_celery_beat
-    command: celery -A worker.celery_app beat --loglevel=info
+    command: celery -A app.worker.celery_app beat --loglevel=info
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -289,13 +282,14 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:1.5b}
       OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:0.8b}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      PARSED_DIR: ${PARSED_DIR:-data/parsed}
+      CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
+      PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
       INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
@@ -387,7 +381,7 @@ services:
   test:
     build:
       context: .
-      dockerfile: deployment/Dockerfile.test
+      dockerfile: deploy/deployment/Dockerfile.test
     image: rag_with_llama:test
     container_name: rag_test
     deploy:
@@ -412,8 +406,6 @@ services:
 
       # LLM Configuration
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      ENTITY_EMBEDDING_MODEL: ${ENTITY_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      ENTITY_EMBEDDING_DIMENSION: 384
 
       # Test environment
       PYTHONPATH: /app

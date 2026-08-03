@@ -14,12 +14,12 @@ import numpy as np
 from unittest.mock import MagicMock, patch
 from dataclasses import fields
 
-from retrieval.reranking import Reranker, RerankedResult, HybridScorer
+from app.retrieval.reranking import Reranker, RerankedResult, HybridScorer
 
 
 @pytest.fixture
 def mock_cross_encoder():
-    with patch('retrieval.reranking.CrossEncoder') as mock_cls:
+    with patch('app.retrieval.reranking.CrossEncoder') as mock_cls:
         mock_model = MagicMock()
         mock_cls.return_value = mock_model
         yield mock_model

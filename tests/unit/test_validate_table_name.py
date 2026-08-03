@@ -7,7 +7,7 @@ Covers the SQL injection prevention regex:
 import pytest
 from fastapi import HTTPException
 
-from api.validators import validate_table_name
+from app.api.validators import validate_table_name
 
 
 class TestValidTableNames:

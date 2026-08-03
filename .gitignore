@@ -32,6 +32,9 @@ uploads/*.txt
 # Input data
 input/
 
+# Derived pipeline artifacts (parsed markdown, chunk dumps) — regenerable
+data/
+
 # Test artifacts
 htmlcov/
 .coverage

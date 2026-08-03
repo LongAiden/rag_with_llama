@@ -9,7 +9,7 @@ Covers:
 """
 import pytest
 
-from ingestion.processors.page_utils import get_page_number_for_position
+from app.ingestion.processors.page_utils import get_page_number_for_position
 
 
 class TestGetPageNumberForPosition:

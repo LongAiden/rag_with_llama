@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from infra.db.identifiers import validate_table_name, quote_ident
-from infra.db.table_repository import TableRepository
+from app.infra.db.identifiers import validate_table_name, quote_ident
+from app.infra.db.table_repository import TableRepository
 
 
 class TestValidateTableName:

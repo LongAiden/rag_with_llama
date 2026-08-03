@@ -16,8 +16,8 @@ import pytest
 from pathlib import Path
 
 # Import directly from modules to avoid cascade through __init__.py
-from ingestion.validation.file_validator import FileValidator
-from models.schemas import SupportedFileType, FileValidationConfig
+from app.ingestion.validation.file_validator import FileValidator
+from app.models.schemas import SupportedFileType, FileValidationConfig
 
 
 class TestFileExtensionValidation:

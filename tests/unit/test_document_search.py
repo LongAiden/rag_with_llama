@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from models.schemas import RAGResponse, SimpleRAGResponse
-from retrieval.search import perform_document_search
+from app.models.schemas import RAGResponse, SimpleRAGResponse
+from app.retrieval.search import perform_document_search
 
 
 def _chunk(chunk_id: str, text: str, similarity: float = 0.9, page: int = 1):
@@ -80,7 +80,7 @@ def llm_response():
 @pytest.fixture(autouse=True)
 def no_telemetry():
     """Never touch the interactions DB from unit tests."""
-    with patch("retrieval.search.log_interaction", new=AsyncMock(return_value=None)):
+    with patch("app.retrieval.search.log_interaction", new=AsyncMock(return_value=None)):
         yield
 
 
@@ -89,7 +89,7 @@ class TestSuccessfulSearch:
 
     @pytest.mark.asyncio
     async def test_returns_rag_response_when_chunks_are_found(self, pipeline, config, llm_response):
-        with patch("retrieval.search.generate_llm_response",
+        with patch("app.retrieval.search.generate_llm_response",
                    new=AsyncMock(return_value=llm_response)):
             result = await perform_document_search(
                 query="what is the answer",
@@ -112,7 +112,7 @@ class TestSuccessfulSearch:
         `config` is a SimpleNamespace, so any stray `config.<missing>` raises
         AttributeError rather than silently succeeding.
         """
-        with patch("retrieval.search.generate_llm_response",
+        with patch("app.retrieval.search.generate_llm_response",
                    new=AsyncMock(return_value=llm_response)):
             result = await perform_document_search(
                 query="what is the answer",
@@ -129,7 +129,7 @@ class TestSuccessfulSearch:
     async def test_llm_is_called_without_an_agent_argument(self, pipeline, config, llm_response):
         """generate_llm_response takes (query, context, results, model=...) only."""
         mock_llm = AsyncMock(return_value=llm_response)
-        with patch("retrieval.search.generate_llm_response", new=mock_llm):
+        with patch("app.retrieval.search.generate_llm_response", new=mock_llm):
             await perform_document_search(
                 query="what is the answer",
                 limit=5,
@@ -147,7 +147,7 @@ class TestSuccessfulSearch:
     @pytest.mark.asyncio
     async def test_context_includes_retrieved_chunk_text(self, pipeline, config, llm_response):
         mock_llm = AsyncMock(return_value=llm_response)
-        with patch("retrieval.search.generate_llm_response", new=mock_llm):
+        with patch("app.retrieval.search.generate_llm_response", new=mock_llm):
             await perform_document_search(
                 query="what is the answer",
                 limit=5,
@@ -171,7 +171,7 @@ class TestNoResults:
         pipeline.vector_store.search_bm25 = AsyncMock(return_value=[])
 
         mock_llm = AsyncMock()
-        with patch("retrieval.search.generate_llm_response", new=mock_llm):
+        with patch("app.retrieval.search.generate_llm_response", new=mock_llm):
             result = await perform_document_search(
                 query="nothing matches this",
                 limit=5,
@@ -190,8 +190,8 @@ class TestReranking:
 
     @pytest.mark.asyncio
     async def test_reranker_failure_falls_back_to_rrf(self, pipeline, config, llm_response):
-        with patch("retrieval.utils.get_reranker", side_effect=RuntimeError("model missing")), \
-             patch("retrieval.search.generate_llm_response", new=AsyncMock(return_value=llm_response)):
+        with patch("app.retrieval.utils.get_reranker", side_effect=RuntimeError("model missing")), \
+             patch("app.retrieval.search.generate_llm_response", new=AsyncMock(return_value=llm_response)):
             result = await perform_document_search(
                 query="what is the answer",
                 limit=5,

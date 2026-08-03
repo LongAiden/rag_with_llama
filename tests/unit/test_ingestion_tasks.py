@@ -76,7 +76,7 @@ def mock_pipeline_cls(parsed_result, chunk_objects):
     cls = MagicMock()
     cls.parse_file = AsyncMock(return_value=parsed_result)
     cls.chunk_parsed_document = MagicMock(return_value=chunk_objects)
-    with patch("ingestion.embedding.pipeline.ChunkEmbeddingPipeline", cls):
+    with patch("app.ingestion.embedding.pipeline.ChunkEmbeddingPipeline", cls):
         yield cls
 
 
@@ -92,8 +92,8 @@ class TestParseDocumentTask:
     """Tests for parse_document_task."""
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_parse_document_success(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -110,7 +110,7 @@ class TestParseDocumentTask:
         })
         mock_repo.transition_to_parsed = AsyncMock()
 
-        from worker.ingestion_tasks import _parse_document
+        from app.worker.ingestion_tasks import _parse_document
         result = await _parse_document("test-doc-id")
 
         assert result["status"] == "parsed"
@@ -119,8 +119,8 @@ class TestParseDocumentTask:
         mock_repo.transition_to_parsed.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_parse_claims_only_its_own_document(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -133,7 +133,7 @@ class TestParseDocumentTask:
         mock_get_repo.return_value = mock_repo
         mock_repo.claim_document = AsyncMock(return_value=None)
 
-        from worker.ingestion_tasks import _parse_document
+        from app.worker.ingestion_tasks import _parse_document
         await _parse_document("test-doc-id")
 
         kwargs = mock_repo.claim_document.call_args.kwargs
@@ -142,8 +142,8 @@ class TestParseDocumentTask:
         assert kwargs["processing_stage"] == "parsing"
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_parse_document_claim_fails(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo
     ):
@@ -152,15 +152,15 @@ class TestParseDocumentTask:
         mock_get_repo.return_value = mock_repo
         mock_repo.claim_document = AsyncMock(return_value=None)
 
-        from worker.ingestion_tasks import _parse_document
+        from app.worker.ingestion_tasks import _parse_document
         result = await _parse_document("test-doc-id")
 
         assert result["status"] == "skipped"
         assert result["stage"] == "parse"
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_parse_document_error_recorded(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -177,7 +177,7 @@ class TestParseDocumentTask:
         mock_pipeline_cls.parse_file = AsyncMock(side_effect=Exception("Parse failed"))
         mock_repo.record_error = AsyncMock()
 
-        from worker.ingestion_tasks import _parse_document
+        from app.worker.ingestion_tasks import _parse_document
         with pytest.raises(Exception, match="Parse failed"):
             await _parse_document("test-doc-id")
 
@@ -185,8 +185,8 @@ class TestParseDocumentTask:
         assert mock_repo.record_error.call_args.kwargs["stage"] == "parse"
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_parse_persists_file_type_and_page_mapping(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -201,7 +201,7 @@ class TestParseDocumentTask:
         })
         mock_repo.transition_to_parsed = AsyncMock()
 
-        from worker.ingestion_tasks import _parse_document
+        from app.worker.ingestion_tasks import _parse_document
         await _parse_document("test-doc-id")
 
         kwargs = mock_repo.transition_to_parsed.call_args.kwargs
@@ -213,8 +213,8 @@ class TestChunkDocumentTask:
     """Tests for chunk_document_task."""
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_chunk_document_success(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -236,7 +236,7 @@ class TestChunkDocumentTask:
         })
         mock_repo.transition_to_chunked = AsyncMock()
 
-        from worker.ingestion_tasks import _chunk_document
+        from app.worker.ingestion_tasks import _chunk_document
         result = await _chunk_document("test-doc-id")
 
         assert result["status"] == "chunked"
@@ -245,8 +245,8 @@ class TestChunkDocumentTask:
         mock_repo.transition_to_chunked.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_chunk_passes_real_file_type(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -272,15 +272,15 @@ class TestChunkDocumentTask:
         })
         mock_repo.transition_to_chunked = AsyncMock()
 
-        from worker.ingestion_tasks import _chunk_document
+        from app.worker.ingestion_tasks import _chunk_document
         await _chunk_document("test-doc-id")
 
         parsed_arg = mock_pipeline_cls.chunk_parsed_document.call_args[0][0]
         assert parsed_arg["file_type"] == "pdf"
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_chunk_falls_back_to_parsed_metadata_file_type(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -301,7 +301,7 @@ class TestChunkDocumentTask:
         })
         mock_repo.transition_to_chunked = AsyncMock()
 
-        from worker.ingestion_tasks import _chunk_document
+        from app.worker.ingestion_tasks import _chunk_document
         await _chunk_document("test-doc-id")
 
         parsed_arg = mock_pipeline_cls.chunk_parsed_document.call_args[0][0]
@@ -310,8 +310,8 @@ class TestChunkDocumentTask:
         assert mock_pipeline_cls.chunk_parsed_document.call_args.kwargs["chunk_size"] == 512
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_chunk_document_missing_parsed_artifact(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo, mock_pipeline_cls
     ):
@@ -328,7 +328,7 @@ class TestChunkDocumentTask:
         mock_repo.get_parsed = AsyncMock(return_value=None)
         mock_repo.record_error = AsyncMock()
 
-        from worker.ingestion_tasks import _chunk_document
+        from app.worker.ingestion_tasks import _chunk_document
         with pytest.raises(ValueError, match="Parsed artifact missing"):
             await _chunk_document("test-doc-id")
 
@@ -339,9 +339,9 @@ class TestEmbedDocumentTask:
     """Tests for embed_document_task."""
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_pipeline")
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_pipeline")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_embed_document_success(
         self, mock_get_config, mock_get_repo, mock_get_pipeline, mock_config, mock_repo, mock_pipeline
     ):
@@ -369,7 +369,7 @@ class TestEmbedDocumentTask:
         })
         mock_repo.transition_to_embedded = AsyncMock()
 
-        from worker.ingestion_tasks import _embed_document
+        from app.worker.ingestion_tasks import _embed_document
         result = await _embed_document("test-doc-id")
 
         assert result["status"] == "embedded"
@@ -382,9 +382,9 @@ class TestEmbedDocumentTask:
         assert kwargs["parser_used"] == "gemini-docling"
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_pipeline")
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_pipeline")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_embed_reads_chunks_as_objects(
         self, mock_get_config, mock_get_repo, mock_get_pipeline, mock_config, mock_repo, mock_pipeline
     ):
@@ -413,7 +413,7 @@ class TestEmbedDocumentTask:
         })
         mock_repo.transition_to_embedded = AsyncMock()
 
-        from worker.ingestion_tasks import _embed_document
+        from app.worker.ingestion_tasks import _embed_document
         await _embed_document("test-doc-id")
 
         chunks = mock_pipeline.embed_chunks.call_args.kwargs["chunks"]
@@ -432,7 +432,7 @@ class TestBuildIngestionChain:
         task's return value, so chunk_document_task(result_dict, doc_id) raised a
         TypeError and no upload ever got past parse.
         """
-        from worker.ingestion_tasks import build_ingestion_chain
+        from app.worker.ingestion_tasks import build_ingestion_chain
 
         task_chain = build_ingestion_chain("doc-1", from_stage="registered")
 
@@ -443,7 +443,7 @@ class TestBuildIngestionChain:
 
     def test_chain_resumes_from_stage(self):
         """A partially processed document only re-runs the stages it still needs."""
-        from worker.ingestion_tasks import build_ingestion_chain
+        from app.worker.ingestion_tasks import build_ingestion_chain
 
         assert len(build_ingestion_chain("d", from_stage="registered").tasks) == 3
         assert len(build_ingestion_chain("d", from_stage="parsed").tasks) == 2
@@ -451,14 +451,14 @@ class TestBuildIngestionChain:
 
     def test_chain_is_none_for_terminal_stages(self):
         """Documents with no work left are not dispatched."""
-        from worker.ingestion_tasks import build_ingestion_chain
+        from app.worker.ingestion_tasks import build_ingestion_chain
 
         assert build_ingestion_chain("d", from_stage="embedded") is None
         assert build_ingestion_chain("d", from_stage="failed") is None
 
     def test_chain_sets_queue_on_every_task(self):
         """Queue is set per signature, not left to chain option propagation."""
-        from worker.ingestion_tasks import build_ingestion_chain
+        from app.worker.ingestion_tasks import build_ingestion_chain
 
         task_chain = build_ingestion_chain("doc-1", from_stage="registered", queue="upload")
 
@@ -470,10 +470,10 @@ class TestRegisterAndDispatch:
     """Tests for register_and_dispatch_task (weekly scan)."""
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks.build_ingestion_chain")
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
-    @patch("worker.ingestion_tasks.INPUT_RAW_DIR")
+    @patch("app.worker.ingestion_tasks.build_ingestion_chain")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks.INPUT_RAW_DIR")
     async def test_register_and_dispatch_scans_files(
         self, mock_input_dir, mock_get_config, mock_get_repo, mock_build_chain,
         mock_config, mock_repo, tmp_path
@@ -498,7 +498,7 @@ class TestRegisterAndDispatch:
         mock_task_chain = MagicMock()
         mock_build_chain.return_value = mock_task_chain
 
-        from worker.ingestion_tasks import _register_and_dispatch
+        from app.worker.ingestion_tasks import _register_and_dispatch
         result = await _register_and_dispatch()
 
         assert result["status"] == "ok"
@@ -509,9 +509,9 @@ class TestRegisterAndDispatch:
         mock_task_chain.apply_async.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
-    @patch("worker.ingestion_tasks.INPUT_RAW_DIR")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks.INPUT_RAW_DIR")
     async def test_scan_skips_files_already_registered_by_path(
         self, mock_input_dir, mock_get_config, mock_get_repo, mock_config, mock_repo, tmp_path
     ):
@@ -536,7 +536,7 @@ class TestRegisterAndDispatch:
         mock_input_dir.iterdir = MagicMock(return_value=[uploaded])
         mock_input_dir.mkdir = MagicMock()
 
-        from worker.ingestion_tasks import _register_and_dispatch
+        from app.worker.ingestion_tasks import _register_and_dispatch
         result = await _register_and_dispatch()
 
         assert result["registered"] == 0
@@ -547,9 +547,9 @@ class TestRecoverAndDispatch:
     """Tests for recover_and_dispatch_task."""
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks.build_ingestion_chain")
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks.build_ingestion_chain")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_recovery_redispatches_reset_documents(
         self, mock_get_config, mock_get_repo, mock_build_chain, mock_config, mock_repo
     ):
@@ -566,7 +566,7 @@ class TestRecoverAndDispatch:
         mock_repo.get_document_status = AsyncMock(return_value={"stage": "parsed"})
         mock_build_chain.return_value = MagicMock()
 
-        from worker.ingestion_tasks import _recover_and_dispatch
+        from app.worker.ingestion_tasks import _recover_and_dispatch
         result = await _recover_and_dispatch()
 
         assert result["status"] == "ok"
@@ -575,8 +575,8 @@ class TestRecoverAndDispatch:
         assert result["dispatched"] == 2
 
     @pytest.mark.asyncio
-    @patch("worker.ingestion_tasks._get_repo")
-    @patch("worker.ingestion_tasks._get_config")
+    @patch("app.worker.ingestion_tasks._get_repo")
+    @patch("app.worker.ingestion_tasks._get_config")
     async def test_recovery_does_not_scan_input_dir(
         self, mock_get_config, mock_get_repo, mock_config, mock_repo
     ):
@@ -587,7 +587,7 @@ class TestRecoverAndDispatch:
         mock_repo.reset_error_documents = AsyncMock(return_value=0)
         mock_repo.get_pending_doc_ids = AsyncMock(return_value=[])
 
-        from worker.ingestion_tasks import _recover_and_dispatch
+        from app.worker.ingestion_tasks import _recover_and_dispatch
         result = await _recover_and_dispatch()
 
         assert "registered" not in result
@@ -604,7 +604,7 @@ class TestEventLoopReuse:
         process-wide asyncpg pool still held connections bound to it, so the
         second task in a worker process failed with "Event loop is closed".
         """
-        import worker.ingestion_tasks as tasks
+        import app.worker.ingestion_tasks as tasks
 
         async def loop_id():
             import asyncio

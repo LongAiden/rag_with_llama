@@ -26,7 +26,7 @@ class TestGetDocumentStatus:
     """Tests for GET /documents/{document_id}/status endpoint."""
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_get_status_success(self, MockRepo, mock_config, mock_repo):
         """Test getting status for a valid document."""
         MockRepo.return_value = mock_repo
@@ -41,7 +41,7 @@ class TestGetDocumentStatus:
             "updated_at": "2026-08-02T10:05:00Z",
         })
 
-        from api.routes.document_routes import get_document_status
+        from app.api.routes.document_routes import get_document_status
         result = await get_document_status("test-doc-id", config=mock_config)
 
         assert result["document_id"] == "test-doc-id"
@@ -50,7 +50,7 @@ class TestGetDocumentStatus:
         assert result["attempts"] == 0
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_get_status_not_found(self, MockRepo, mock_config, mock_repo):
         """Test getting status for non-existent document returns 404."""
         from fastapi import HTTPException
@@ -58,7 +58,7 @@ class TestGetDocumentStatus:
         MockRepo.return_value = mock_repo
         mock_repo.get_document_status = AsyncMock(return_value=None)
 
-        from api.routes.document_routes import get_document_status
+        from app.api.routes.document_routes import get_document_status
         with pytest.raises(HTTPException) as exc_info:
             await get_document_status("non-existent-id", config=mock_config)
 
@@ -66,7 +66,7 @@ class TestGetDocumentStatus:
         assert "Document not found" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_get_status_with_error(self, MockRepo, mock_config, mock_repo):
         """Test getting status for a document that had errors."""
         MockRepo.return_value = mock_repo
@@ -81,7 +81,7 @@ class TestGetDocumentStatus:
             "updated_at": "2026-08-02T10:05:00Z",
         })
 
-        from api.routes.document_routes import get_document_status
+        from app.api.routes.document_routes import get_document_status
         result = await get_document_status("test-doc-id", config=mock_config)
 
         assert result["stage"] == "error"
@@ -89,7 +89,7 @@ class TestGetDocumentStatus:
         assert "Parse failed" in result["last_error"]
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_get_status_embedded(self, MockRepo, mock_config, mock_repo):
         """Test getting status for a fully processed document."""
         MockRepo.return_value = mock_repo
@@ -104,14 +104,14 @@ class TestGetDocumentStatus:
             "updated_at": "2026-08-02T10:10:00Z",
         })
 
-        from api.routes.document_routes import get_document_status
+        from app.api.routes.document_routes import get_document_status
         result = await get_document_status("test-doc-id", config=mock_config)
 
         assert result["stage"] == "embedded"
         assert result["chunk_count"] == 15
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_get_status_repository_error(self, MockRepo, mock_config, mock_repo):
         """Test repository errors are handled gracefully."""
         from fastapi import HTTPException
@@ -119,7 +119,7 @@ class TestGetDocumentStatus:
         MockRepo.return_value = mock_repo
         mock_repo.get_document_status = AsyncMock(side_effect=Exception("DB connection failed"))
 
-        from api.routes.document_routes import get_document_status
+        from app.api.routes.document_routes import get_document_status
         with pytest.raises(HTTPException) as exc_info:
             await get_document_status("test-doc-id", config=mock_config)
 
@@ -133,17 +133,17 @@ class TestDeleteDocument:
     @pytest.fixture(autouse=True)
     def bypass_auth(self):
         """Auth is asserted separately; these tests exercise the delete behaviour."""
-        with patch("api.routes.document_routes.require_access_password"):
+        with patch("app.api.routes.document_routes.require_access_password"):
             yield
 
     @pytest.mark.asyncio
     async def test_delete_requires_access_password(self, mock_config):
         """The endpoint is password-guarded when APP_ACCESS_PASSWORD is configured."""
         from fastapi import HTTPException
-        import api.routes.document_routes as routes
+        import app.api.routes.document_routes as routes
 
         with patch(
-            "api.routes.document_routes.require_access_password",
+            "app.api.routes.document_routes.require_access_password",
             side_effect=HTTPException(status_code=403, detail="Invalid access password"),
         ):
             with pytest.raises(HTTPException) as exc_info:
@@ -174,12 +174,12 @@ class TestDeleteDocument:
         return _get_pipeline, pipeline
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_delete_removes_row_chunks_and_raw_file(
         self, MockRepo, mock_config, mock_repo, status_row, mock_get_pipeline, tmp_path
     ):
         """Deleting clears the status row, the vector chunks and the raw file."""
-        import api.routes.document_routes as routes
+        import app.api.routes.document_routes as routes
 
         row, raw_file = status_row
         MockRepo.return_value = mock_repo
@@ -200,11 +200,11 @@ class TestDeleteDocument:
         mock_repo.delete_document.assert_called_once_with("test-doc-id")
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_delete_not_found(self, MockRepo, mock_config, mock_repo):
         """Deleting a non-existent document returns 404."""
         from fastapi import HTTPException
-        import api.routes.document_routes as routes
+        import app.api.routes.document_routes as routes
 
         MockRepo.return_value = mock_repo
         mock_repo.get_document_status = AsyncMock(return_value=None)
@@ -216,12 +216,12 @@ class TestDeleteDocument:
         mock_repo.delete_document.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_delete_refuses_raw_file_outside_input_dir(
         self, MockRepo, mock_config, mock_repo, mock_get_pipeline, tmp_path
     ):
         """A raw path outside INPUT_RAW_DIR is left alone, not unlinked."""
-        import api.routes.document_routes as routes
+        import app.api.routes.document_routes as routes
 
         outsider = tmp_path / "elsewhere.pdf"
         outsider.write_text("do not delete me")
@@ -246,12 +246,12 @@ class TestDeleteDocument:
         assert outsider.exists()
 
     @pytest.mark.asyncio
-    @patch("api.routes.document_routes.IngestionRepository")
+    @patch("app.api.routes.document_routes.IngestionRepository")
     async def test_delete_can_keep_chunks_and_file(
         self, MockRepo, mock_config, mock_repo, status_row, mock_get_pipeline, tmp_path
     ):
         """Flags allow clearing only the status row."""
-        import api.routes.document_routes as routes
+        import app.api.routes.document_routes as routes
 
         row, raw_file = status_row
         MockRepo.return_value = mock_repo

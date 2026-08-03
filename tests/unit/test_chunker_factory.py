@@ -10,7 +10,7 @@ import pytest
 import warnings
 from unittest.mock import patch
 
-from ingestion.chunking.chunker_factory import (
+from app.ingestion.chunking.chunker_factory import (
     get_chunker,
     chunk_markdown,
     chunk_text,

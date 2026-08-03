@@ -61,9 +61,6 @@ docker-compose*.yml
 .gitignore
 .gitattributes
 
-# Archived code
-.archive/
-
 # Documentation
 docs/
 !docs/images/
@@ -88,7 +85,7 @@ uploads/
 *.parquet
 
 # Experiments and examples
-experiment/
+experiments/
 examples/
 
 # Temporary files

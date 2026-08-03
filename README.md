@@ -47,7 +47,7 @@ dependencies and only needs to run once. Subsequent builds are fast.
 
 ```bash
 # Step 1 - build the base image (first time only, ~8–10 min)
-docker build -f deployment/Dockerfile.base -t rag-base:latest .
+docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
 
 # Step 2 - build and start all services (~1–2 min)
 docker compose up --build
@@ -82,9 +82,9 @@ For running notebooks and scripts outside Docker, use **uv** (fast Python packag
 # Install uv (once)
 pip install uv
 
-# Create a venv and install dependencies from deployment/requirements.txt
+# Create a venv and install dependencies from deploy/deployment/requirements.txt
 uv venv
-uv pip install -r deployment/requirements.txt
+uv pip install -r deploy/deployment/requirements.txt
 
 # Run a script with the project venv
 uv run python scripts/process_pdf.py
@@ -93,11 +93,11 @@ uv run python scripts/process_pdf.py
 source .venv/bin/activate
 ```
 
-Dependencies are defined in `deployment/requirements.txt`. For testing, also install pytest:
+Dependencies are defined in `deploy/deployment/requirements.txt`. For testing, also install pytest:
 
 ```bash
 uv pip install pytest pytest-asyncio httpx
-PYTHONPATH=. pytest tests/unit -v
+pytest tests/unit -v   # pytest.ini already puts src/ on the path
 ```
 
 > **GPU note:** If you need CUDA, install PyTorch with the CUDA wheels instead of CPU-only.
@@ -135,7 +135,7 @@ docker compose --profile test run --rm test pytest tests/unit/test_llm_provider.
 ### Run with coverage
 
 ```bash
-docker compose --profile test run --rm test pytest --cov=. --cov-report=html --cov-report=term
+docker compose --profile test run --rm test pytest --cov=app --cov-report=html --cov-report=term
 ```
 
 ### Test markers
@@ -266,108 +266,137 @@ curl -X POST "http://127.0.0.1:8000/query" \
 ```
 rag_with_llama/
 │
-├── input/                        # Runtime I/O
+├── src/app/                      # All application code, one importable root
+│   │
+│   ├── ingestion/                # Document ingestion pipeline
+│   │   ├── artifacts.py          # Writes data/parsed + data/chunks dumps
+│   │   ├── processors/           # Parser per file type + Docling/Ollama/Gemini backends
+│   │   │   ├── processor_factory.py  # Picks processor by file type
+│   │   │   ├── pdf_parser_factory.py # Picks PDF backend (Ollama VLM vs Gemini)
+│   │   │   ├── docx_processor.py
+│   │   │   └── txt_processor.py
+│   │   ├── chunking/
+│   │   │   └── chunker_factory.py    # token / recursive / markdown / semantic
+│   │   ├── embedding/            # Split by responsibility
+│   │   │   ├── chunk.py           # Chunk dataclass
+│   │   │   ├── generator.py       # EmbeddingGenerator (SentenceTransformer)
+│   │   │   ├── vector_store.py    # VectorStore (pgvector data access)
+│   │   │   └── pipeline.py        # ChunkEmbeddingPipeline (orchestration)
+│   │   ├── extraction/           # Entity extraction flow (graph feature, unwired)
+│   │   ├── text_cleaning/
+│   │   │   └── cleaners.py
+│   │   └── validation/
+│   │       └── file_validator.py
+│   │
+│   ├── retrieval/
+│   │   ├── search.py             # Vector search → BM25 rerank → LLM
+│   │   ├── llm_operations.py     # LLM answer generation (Gemini or Ollama)
+│   │   ├── reranking.py          # Cross-encoder reranker
+│   │   └── utils.py              # BM25 scorer, RRF merge
+│   │
+│   ├── api/
+│   │   ├── app.py                # FastAPI app, route registration
+│   │   ├── validators.py
+│   │   ├── renderer.py           # Jinja2 template renderer
+│   │   ├── templates/            # HTML templates (Jinja2, autoescaped)
+│   │   └── routes/
+│   │       ├── document_routes.py    # Upload, status, delete document
+│   │       ├── query_routes.py       # Home page, query / query-form
+│   │       ├── table_routes.py       # List / count / delete tables
+│   │       ├── admin_routes.py       # Stats, health check
+│   │       ├── observability_routes.py  # LLM interaction stats/history
+│   │       └── graph_routes.py       # Graph feature — NOT mounted
+│   │
+│   ├── graph/                    # Knowledge graph feature (unwired, see below)
+│   │   ├── entity_extraction.py
+│   │   ├── relationship_extraction.py
+│   │   ├── graph_service.py
+│   │   └── {gemini,ollama}_provider.py
+│   │
+│   ├── config/
+│   │   ├── app_config.py         # AppConfig, AppSettings, DatabaseConfig
+│   │   └── graph_config.py       # GraphConfig (graph feature)
+│   │
+│   ├── models/
+│   │   ├── schemas.py            # Pydantic request/response models
+│   │   └── graph_models.py       # Graph feature schemas
+│   │
+│   ├── worker/
+│   │   ├── celery_app.py
+│   │   └── ingestion_tasks.py    # Stage-based parse / chunk / embed tasks
+│   │
+│   └── infra/                    # Shared plumbing (used by 2+ layers)
+│       ├── db/                   # Connection pool, repositories, identifiers
+│       │   ├── pool.py
+│       │   ├── identifiers.py    # validate_table_name, quote_ident
+│       │   ├── table_repository.py
+│       │   └── ingestion_repository.py
+│       └── telemetry/            # LLM interaction logger
+│           └── llm_logger.py
+│
+├── input/                        # Runtime input (gitignored)
 │   └── raw/                      # Original files from API uploads / weekly scan
 │
-├── ingestion/                    # Document ingestion pipeline
-│   ├── processors/               # Parser per file type + Docling/Ollama/Gemini backends
-│   │   ├── processor_factory.py  # Picks processor by file type
-│   │   ├── pdf_parser_factory.py # Picks PDF backend (Ollama VLM vs Gemini)
-│   │   ├── pdf_processor.py
-│   │   ├── docx_processor.py
-│   │   └── txt_processor.py
-│   ├── chunking/
-│   │   └── chunker_factory.py    # token / recursive / markdown / semantic
-│   ├── embedding/                # Split by responsibility
-│   │   ├── chunk.py               # Chunk dataclass
-│   │   ├── generator.py           # EmbeddingGenerator (SentenceTransformer)
-│   │   ├── vector_store.py        # VectorStore (pgvector data access)
-│   │   └── pipeline.py            # ChunkEmbeddingPipeline (orchestration)
-│   ├── text_cleaning/
-│   │   └── cleaners.py
-│   └── validation/
-│       └── file_validator.py
-│
-├── retrieval/
-│   ├── search.py                 # Vector search → BM25 rerank → LLM
-│   ├── llm_operations.py         # LLM answer generation (Gemini or Ollama)
-│   ├── reranking.py              # Cross-encoder reranker
-│   └── utils.py                  # BM25 scorer, RRF merge
-│
-├── api/
-│   ├── app.py                    # FastAPI app, route registration
-│   ├── validators.py
-│   ├── renderer.py               # Jinja2 template renderer
-│   ├── templates/                # HTML templates (Jinja2, autoescaped)
-│   │   ├── base.html
-│   │   ├── home.html
-│   │   ├── search_results.html
-│   │   ├── search_error.html
-│   │   ├── stats.html
-│   │   ├── stats_error.html
-│   │   ├── health_check.html
-│   │   └── health_error.html
-│   └── routes/
-│       ├── document_routes.py    # Upload, status, delete document
-│       ├── query_routes.py       # Home page, query / query-form
-│       ├── table_routes.py       # List / count / delete tables
-│       ├── admin_routes.py       # Stats, health check
-│       └── observability_routes.py  # LLM interaction stats/history
-│
-├── config/
-│   └── app_config.py             # AppConfig, AppSettings, DatabaseConfig
-│
-├── models/
-│   └── schemas.py                # Pydantic request/response models
-│
-├── worker/
-│   ├── __init__.py
-│   ├── celery_app.py
-│   └── ingestion_tasks.py        # Stage-based parse / chunk / embed tasks
-│
-├── infra/                        # Shared plumbing (used by 2+ layers)
-│   ├── db/                       # Connection pool, repositories, identifiers
-│   │   ├── pool.py
-│   │   ├── identifiers.py        # validate_table_name, quote_ident
-│   │   ├── table_repository.py
-│   │   └── ingestion_repository.py
-│   └── telemetry/                # LLM interaction logger
-│       └── llm_logger.py
+├── data/                         # Derived pipeline artifacts (gitignored)
+│   ├── parsed/                   # <document_id>_<name>.md from the parse stage
+│   └── chunks/                   # One folder per document from the chunk stage
+│       └── <document_id>_<name>/
+│           ├── 0000.md           # One file per chunk
+│           └── index.json        # Per-chunk metadata
 │
 ├── tests/
 │   ├── unit/                     # No DB required
 │   └── integration/              # Requires running postgres
 │
+├── deploy/
+│   ├── deployment/
+│   │   ├── Dockerfile            # App image (uses Dockerfile.base)
+│   │   ├── Dockerfile.base       # Heavy ML deps (build once)
+│   │   ├── Dockerfile.postgres   # Postgres + pgvector
+│   │   ├── Dockerfile.test       # Test runner
+│   │   ├── requirements.txt
+│   │   └── Makefile              # Test + dev shortcuts
+│   └── migrations/
+│       ├── optional/            # Not applied by initdb (graph schema)
+│       ├── 002_create_llm_interactions.sql
+│       ├── 003_create_ingestion_status.sql
+│       ├── 004_ingestion_fixes.sql
+│       └── 005_drop_filename_dedupe.sql
+│
 ├── docs/                         # Developer documentation & images
+│   ├── ARCHITECTURE.md           # Read this first
 │   ├── images/                   # Screenshots and README assets
-│   ├── archive/                  # Historical refactoring notes
-│   ├── 20260619_chunking-strategies.md
-│   ├── 20260619_docker-setup.md
-│   ├── 20260619_project-architecture-summary.md
-│   ├── 20260619_testing.md
-│   ├── 20260626_chunk-context-enrichment.md
-│   ├── 20260802_ingestion_workflow.md
-│   ├── 20260802_ingestion_pipeline_fixes.md
-│   └── 20260802_project_refactoring.md
+│   └── archive/                  # Historical refactoring notes
 │
-├── migrations/
-│   ├── 002_create_llm_interactions.sql
-│   ├── 003_create_ingestion_status.sql
-│   └── 004_ingestion_fixes.sql
-│
-├── deployment/
-│   ├── Dockerfile                # App image (uses Dockerfile.base)
-│   ├── Dockerfile.base           # Heavy ML deps (build once)
-│   ├── Dockerfile.postgres       # Postgres + pgvector
-│   ├── Dockerfile.test           # Test runner
-│   ├── requirements.txt
-│   └── Makefile                  # Test + dev shortcuts
-│
+├── experiments/                  # Scratch notebooks, kept as reference only
 ├── docker-compose.yml
+├── pytest.ini
 └── .env.example
 ```
 
-The knowledge-graph feature (entity/relationship extraction) was implemented but never wired into the live app; it's preserved in `.archive/graph_feature/` rather than the main tree.
+Everything under `src/app/` imports as `app.*` — `from app.ingestion.embedding.pipeline import ChunkEmbeddingPipeline`. `pytest.ini` puts `src/` on the path locally; the Docker images set `PYTHONPATH=/app/src`.
+
+### Ingestion artifacts
+
+The parse and chunk stages each dump their output under `data/` so it can be read
+directly instead of queried out of JSONB. Postgres (`document_parsed`,
+`document_chunked`) stays the source of truth; `data/` is regenerable and
+gitignored. Set `PERSIST_INGESTION_ARTIFACTS=false` to turn the dumps off, or
+point `PARSED_DIR` / `CHUNKS_DIR` elsewhere. A failed artifact write is logged
+and skipped — it never fails the ingestion.
+
+### Knowledge graph
+
+The knowledge-graph feature (entity/relationship extraction) lives in
+`src/app/graph/` with its config, models, extraction flow, and routes. It is
+**not part of the workflow**: no `/graph` endpoint is served, no live module
+imports it, its schema sits in `deploy/migrations/optional/` where Postgres'
+initdb ignores it, and its settings are absent from `docker-compose.yml` and
+`.env.example`. `tests/unit/test_graph_not_wired.py` keeps it that way.
+
+To enable it: mount `graph_routes.router`, apply
+`deploy/migrations/optional/001_create_graph_tables.sql`, restore the settings
+in `src/app/config/graph_config.py`, and delete that test file.
 
 ---
 
@@ -416,19 +445,19 @@ No API key or internet connection is required for Ollama models. `GOOGLE_API_KEY
 
 ## Running Tests
 
-The Makefile is in `deployment/`. Use it with:
+The Makefile is in `deploy/deployment/`. Use it with:
 
 ```bash
-make -f deployment/Makefile <target>
+make -f deploy/deployment/Makefile <target>
 ```
 
 | Command | Description |
 |---------|-------------|
-| `make -f deployment/Makefile test-unit` | Unit tests locally (no DB) |
-| `make -f deployment/Makefile test-integration` | Integration tests locally |
-| `make -f deployment/Makefile test-docker-unit` | Unit tests in Docker |
-| `make -f deployment/Makefile test-docker` | All tests in Docker |
-| `make -f deployment/Makefile coverage` | HTML coverage report |
+| `make -f deploy/deployment/Makefile test-unit` | Unit tests locally (no DB) |
+| `make -f deploy/deployment/Makefile test-integration` | Integration tests locally |
+| `make -f deploy/deployment/Makefile test-docker-unit` | Unit tests in Docker |
+| `make -f deploy/deployment/Makefile test-docker` | All tests in Docker |
+| `make -f deploy/deployment/Makefile coverage` | HTML coverage report |
 
 Or run pytest directly:
 ```bash
@@ -506,7 +535,7 @@ docker compose up --build
 ```bash
 docker compose down -v
 docker system prune -a
-docker build -f deployment/Dockerfile.base -t rag-base:latest .
+docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
 docker compose up --build
 ```
 
@@ -534,6 +563,28 @@ Passing a raw `list` for `$4` or a raw `dict` for `$5` causes asyncpg to raise a
 ```bash
 docker exec rag_postgres psql -U admin -d rag_db -c "\dt"
 docker exec -it rag_redis redis-cli
+```
+
+**Inspect ingestion status:**
+```bash
+# Load env vars so psql uses the right DB credentials
+set -a && source .env && set +a
+
+# Recent documents and their stages
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, claimed_at, last_error FROM documents ORDER BY created_at DESC LIMIT 10;"
+
+# Documents stuck in a processing stage (likely OOM-killed worker)
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, claimed_at FROM documents WHERE stage IN ('parsing','chunking','embedding');"
+
+# Failed / error documents
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, last_error FROM documents WHERE stage IN ('error','failed');"
+
+# Reset a stuck document back to the start
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "UPDATE documents SET stage = 'registered', claimed_at = NULL, claimed_by = NULL, attempts = 0 WHERE id = 'YOUR_DOCUMENT_ID';"
 ```
 
 ## Known Limitations

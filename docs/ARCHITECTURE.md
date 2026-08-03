@@ -22,27 +22,37 @@ The default embedding model is **all-MiniLM-L6-v2** (384-dim). The default reran
 ```
 Raw file  →  documents status DB  →  parse  →  chunk  →  embed  →  pgvector  →  query + rerank  →  LLM answer
 input/raw/        one row per file         chunker    embedding    chunk table   BM25 / RRF / cross-encoder   Gemini / Ollama
-                (stage-based, claim/retry)
+                (stage-based, claim/retry)     │          │
+                                        data/parsed/  data/chunks/<doc>/
+                                        (inspectable artifacts, gitignored)
 ```
 
 ---
 
 ## 2. Directory Layout
 
+All application code lives under `src/app/` and imports as `app.*` — e.g.
+`from app.ingestion.embedding.pipeline import ChunkEmbeddingPipeline`. `pytest.ini`
+puts `src/` on the path locally; the Docker images set `PYTHONPATH=/app/src`.
+
 | Directory | Purpose |
 |---|---|
-| `api/` | FastAPI app, routes, request validation, dependencies, HTML templates |
-| `config/` | Centralized configuration (`AppSettings` via pydantic-settings, `AppConfig`) |
-| `infra/` | Shared infrastructure: asyncpg connection pool, repositories, telemetry |
-| `ingestion/` | Document ingestion: processors, chunkers, embedding, text cleaning |
-| `models/` | Pydantic request/response schemas |
-| `retrieval/` | Search, reranking, and LLM answer generation |
-| `worker/` | Celery app and stage-based ingestion tasks |
-| `migrations/` | SQL schema files applied by Postgres on first volume creation |
-| `deployment/` | Dockerfiles, `requirements.txt`, Makefile |
+| `src/app/api/` | FastAPI app, routes, request validation, dependencies, HTML templates |
+| `src/app/config/` | Centralized configuration (`AppSettings` via pydantic-settings, `AppConfig`) |
+| `src/app/infra/` | Shared infrastructure: asyncpg connection pool, repositories, telemetry |
+| `src/app/ingestion/` | Document ingestion: processors, chunkers, embedding, text cleaning, artifacts |
+| `src/app/graph/` | Knowledge graph feature — present but **not wired into the app** |
+| `src/app/models/` | Pydantic request/response schemas |
+| `src/app/retrieval/` | Search, reranking, and LLM answer generation |
+| `src/app/worker/` | Celery app and stage-based ingestion tasks |
+| `input/raw/` | Original uploaded / scanned files (gitignored) |
+| `data/parsed/` | Markdown written by the parse stage (gitignored, regenerable) |
+| `data/chunks/` | One folder per document written by the chunk stage (gitignored) |
+| `deploy/migrations/` | SQL schema files applied by Postgres on first volume creation |
+| `deploy/deployment/` | Dockerfiles, `requirements.txt`, Makefile |
 | `tests/` | `unit/` (no DB) and `integration/` (requires Postgres) |
 | `docs/` | Architecture decisions, design notes, and runbooks |
-| `.archive/` | Disabled features (knowledge graph) kept out of the active tree |
+| `experiments/` | Scratch notebooks and scripts, reference only |
 
 A more detailed file map is in the [`README.md` project structure section](../README.md#project-structure).
 
@@ -103,6 +113,35 @@ Every input file gets exactly one row in `documents`.
 
 Both are unique on `document_id` (migration 004) so retries overwrite rather than append.
 
+### 4.2b On-disk artifacts (`data/`)
+
+Postgres is the source of truth, but JSONB is a poor way to eyeball a bad chunk
+boundary, so the parse and chunk stages also dump their output to disk:
+
+```
+data/parsed/<document_id>_<name>.md        markdown from the parse stage
+data/chunks/<document_id>_<name>/
+    0000.md, 0001.md, ...                  one file per chunk, text only
+    index.json                             per-chunk page/section/token metadata
+```
+
+Written by `src/app/ingestion/artifacts.py`, called from
+`ChunkEmbeddingPipeline.parse_file` and `chunk_parsed_document`. Rules that make
+this safe to leave on:
+
+- `data/` is gitignored and fully regenerable — deleting it loses nothing.
+- Writes never raise. An `OSError` is logged and skipped, because a debugging aid
+  must not fail an ingestion that otherwise succeeded.
+- `document_id` is allowlisted (`[A-Za-z0-9_-]{1,64}`) before it becomes a path
+  component, and filenames are stripped to their basename and sanitised.
+- A re-chunk clears the document's folder first, so a retry producing fewer
+  chunks cannot leave a stale tail behind that reads as real output.
+- `index.json` deliberately omits `full_content` — it holds the chunk's entire
+  source page, so every chunk on a page would repeat that page into the index.
+
+Set `PERSIST_INGESTION_ARTIFACTS=false` to disable, or point `PARSED_DIR` /
+`CHUNKS_DIR` elsewhere.
+
 ### 4.3 Stage flow
 
 ```
@@ -114,12 +153,13 @@ registered → [parse] → parsed → [chunk] → chunked → [embed] → embedd
 
 ### 4.4 Key files
 
-- `worker/ingestion_tasks.py` — Celery task definitions and the stage runner (`_run_stage`).
-- `infra/db/ingestion_repository.py` — atomic DB operations (`claim_document`, `transition_to_*`, `record_error`, etc.).
-- `ingestion/embedding/pipeline.py` — `ChunkEmbeddingPipeline` with static `parse_file` and `chunk_parsed_document`.
-- `ingestion/embedding/vector_store.py` — `VectorStore` (pgvector CRUD + BM25).
-- `ingestion/processors/` — per-file-type parsers and PDF backend factory.
-- `ingestion/chunking/chunker_factory.py` — chonkie-based chunker factory.
+- `src/app/worker/ingestion_tasks.py` — Celery task definitions and the stage runner (`_run_stage`).
+- `src/app/infra/db/ingestion_repository.py` — atomic DB operations (`claim_document`, `transition_to_*`, `record_error`, etc.).
+- `src/app/ingestion/embedding/pipeline.py` — `ChunkEmbeddingPipeline` with static `parse_file` and `chunk_parsed_document`.
+- `src/app/ingestion/embedding/vector_store.py` — `VectorStore` (pgvector CRUD + BM25).
+- `src/app/ingestion/artifacts.py` — on-disk parse/chunk dumps under `data/`.
+- `src/app/ingestion/processors/` — per-file-type parsers and PDF backend factory.
+- `src/app/ingestion/chunking/chunker_factory.py` — chonkie-based chunker factory.
 
 ### 4.5 Worker persistence caveats
 
@@ -128,7 +168,7 @@ Two things are load-bearing in the worker:
 1. **Immutable Celery signatures** (`.si()`): a plain `.s()` chain would pass each task's return value as the next task's first argument, but the task signature is `(doc_id,)`.
 2. **One persistent event loop per worker process**: `asyncio.run()` per task closes the loop while the module-level `ConnectionPoolManager` cache still holds connections bound to it, causing the next task to fail with `RuntimeError: Event loop is closed`.
 
-See `worker/ingestion_tasks.py:_run()` and `build_ingestion_chain()`.
+See `src/app/worker/ingestion_tasks.py:_run()` and `build_ingestion_chain()`.
 
 ---
 
@@ -137,8 +177,8 @@ See `worker/ingestion_tasks.py:_run()` and `build_ingestion_chain()`.
 ### 5.1 End-to-end flow
 
 1. `POST /query` (or `POST /query-form`) receives `query`, `table_name`, `limit`, `threshold`, `model`, etc.
-2. `api/routes/query_routes.py` validates the table name, then calls `get_pipeline(table_name)` to retrieve or create a `ChunkEmbeddingPipeline`.
-3. `retrieval/search.py:perform_document_search()` does the work:
+2. `src/app/api/routes/query_routes.py` validates the table name, then calls `get_pipeline(table_name)` to retrieve or create a `ChunkEmbeddingPipeline`.
+3. `src/app/retrieval/search.py:perform_document_search()` does the work:
    - Generate query embedding (SentenceTransformer, in worker thread).
    - Vector search (`pgvector` cosine similarity, `HYBRID_LIMIT = 20`).
    - BM25 lexical search over the same table.
@@ -152,24 +192,24 @@ See `worker/ingestion_tasks.py:_run()` and `build_ingestion_chain()`.
 
 ### 5.2 Key files
 
-- `retrieval/search.py` — orchestration and context building.
-- `retrieval/llm_operations.py` — `GeminiBackend` and `OllamaBackend`.
-- `retrieval/reranking.py` — `Reranker` (cross-encoder) and `HybridScorer`.
-- `retrieval/utils.py` — `merge_with_rrf()` and `get_reranker()`.
-- `api/dependencies.py` — per-table pipeline cache and dependency providers.
+- `src/app/retrieval/search.py` — orchestration and context building.
+- `src/app/retrieval/llm_operations.py` — `GeminiBackend` and `OllamaBackend`.
+- `src/app/retrieval/reranking.py` — `Reranker` (cross-encoder) and `HybridScorer`.
+- `src/app/retrieval/utils.py` — `merge_with_rrf()` and `get_reranker()`.
+- `src/app/api/dependencies.py` — per-table pipeline cache and dependency providers.
 
 ### 5.3 Pipeline caching
 
 `ChunkEmbeddingPipeline` loads a `SentenceTransformer` model, which is slow and CPU-intensive. Two caches avoid reloading per request:
 
-- **API process**: `api/dependencies.py` keeps a per-table `_PIPELINES` dict under an `asyncio.Lock`.
-- **Worker processes**: `worker/ingestion_tasks.py` keeps `_PIPELINES` per table per process.
+- **API process**: `src/app/api/dependencies.py` keeps a per-table `_PIPELINES` dict under an `asyncio.Lock`.
+- **Worker processes**: `src/app/worker/ingestion_tasks.py` keeps `_PIPELINES` per table per process.
 
 When a table is deleted (`DELETE /table/{name}`), `forget_pipeline()` evicts the cache entry.
 
 ### 5.4 LLM backend selection
 
-`retrieval/llm_operations.py:_get_backend(model)` returns `GeminiBackend` for model names starting with `gemini-`, otherwise `OllamaBackend`. The Gemini SDK call is synchronous and is wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
+`src/app/retrieval/llm_operations.py:_get_backend(model)` returns `GeminiBackend` for model names starting with `gemini-`, otherwise `OllamaBackend`. The Gemini SDK call is synchronous and is wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
 
 ---
 
@@ -177,27 +217,26 @@ When a table is deleted (`DELETE /table/{name}`), `forget_pipeline()` evicts the
 
 ### 6.1 Connection pool
 
-`infra/db/pool.py:ConnectionPoolManager` is a singleton keyed by connection string. It creates one `asyncpg` pool per unique connection string and registers json/jsonb codecs on every connection so Python `dict` and `list` values round-trip natively.
+`src/app/infra/db/pool.py:ConnectionPoolManager` is a singleton keyed by connection string. It creates one `asyncpg` pool per unique connection string and registers json/jsonb codecs on every connection so Python `dict` and `list` values round-trip natively.
 
 ### 6.2 Repositories
 
 | Repository | File | Responsibility |
 |---|---|---|
-| `IngestionRepository` | `infra/db/ingestion_repository.py` | `documents`, `document_parsed`, `document_chunked` CRUD, claims, retries, status |
-| `TableRepository` | `infra/db/table_repository.py` | List/count chunk tables, drop tables, per-table stats |
-| `VectorStore` | `ingestion/embedding/vector_store.py` | Per-table chunk CRUD, similarity search, BM25, delete by document |
+| `IngestionRepository` | `src/app/infra/db/ingestion_repository.py` | `documents`, `document_parsed`, `document_chunked` CRUD, claims, retries, status |
+| `TableRepository` | `src/app/infra/db/table_repository.py` | List/count chunk tables, drop tables, per-table stats |
+| `VectorStore` | `src/app/ingestion/embedding/vector_store.py` | Per-table chunk CRUD, similarity search, BM25, delete by document |
 
 ### 6.3 Safe identifiers
 
-`infra/db/identifiers.py` validates and quotes table names. Only `[a-zA-Z_][a-zA-Z0-9_]{0,62}` is allowed. SQL identifiers are double-quoted before interpolation. All user-supplied table names must pass `validate_table_name()` before they reach `VectorStore` or `TableRepository`.
+`src/app/infra/db/identifiers.py` validates and quotes table names. Only `[a-zA-Z_][a-zA-Z0-9_]{0,62}` is allowed. SQL identifiers are double-quoted before interpolation. All user-supplied table names must pass `validate_table_name()` before they reach `VectorStore` or `TableRepository`.
 
 ### 6.4 Migrations
 
-SQL files in `migrations/` are mounted to `/docker-entrypoint-initdb.d` and run by Postgres **only when the data volume is empty**. Existing volumes require manual application.
+SQL files in `deploy/migrations/` are mounted to `/docker-entrypoint-initdb.d` and run by Postgres **only when the data volume is empty**. Existing volumes require manual application. `deploy/migrations/optional/` is a subdirectory, which initdb skips — it holds the graph schema, which is not applied (see 9.3).
 
 | Migration | Purpose |
 |---|---|
-| `001_create_graph_tables.sql` | Graph tables (disabled); PageRank function commented out |
 | `002_create_llm_interactions.sql` | Query/answer logging table |
 | `003_create_ingestion_status.sql` | `documents`, `document_parsed`, `document_chunked` |
 | `004_ingestion_fixes.sql` | Adds `file_type`, `error_stage`, unique artifact indexes |
@@ -207,13 +246,13 @@ SQL files in `migrations/` are mounted to `/docker-entrypoint-initdb.d` and run 
 
 ## 7. Configuration
 
-Configuration is centralized in `config/app_config.py`.
+Configuration is centralized in `src/app/config/app_config.py`.
 
 - `AppSettings` — pydantic-settings class that reads from `.env`.
 - `DatabaseConfig` — Postgres connection parameters.
 - `AppConfig` — global config object, lazy-loads pipeline and reranker, configures Logfire.
 
-`api/dependencies.py` creates a module-level `config = AppConfig()` and exposes `get_config()`, `get_pipeline_factory()`, `get_forget_pipeline()` for FastAPI `Depends`.
+`src/app/api/dependencies.py` creates a module-level `config = AppConfig()` and exposes `get_config()`, `get_pipeline_factory()`, `get_forget_pipeline()` for FastAPI `Depends`.
 
 Important rule: **all code must read environment variables through `AppSettings`**, not bare `os.getenv`, because pydantic-settings reads `.env` but `os.getenv` does not. Several bugs were fixed where `.env`-only values were silently ignored by the worker.
 
@@ -230,6 +269,9 @@ Key environment variables (see [`.env.example`](../.env.example) for the full li
 | `PDF_PARSER_BACKEND` | `ollama` or `gemini-docling` |
 | `CHUNKER_TYPE` | `markdown` (default), `recursive`, `token`, `semantic` |
 | `INPUT_RAW_DIR` | Where raw files are stored |
+| `PARSED_DIR` | Where parse-stage markdown is dumped (default `data/parsed`) |
+| `CHUNKS_DIR` | Where chunk-stage folders are dumped (default `data/chunks`) |
+| `PERSIST_INGESTION_ARTIFACTS` | Set false to skip both dumps (default true) |
 | `INGESTION_MAX_ATTEMPTS` | Max retries before `failed` |
 | `INGESTION_CLAIM_TIMEOUT_MINUTES` | Stale claim timeout |
 | `DEFAULT_CHUNK_SIZE` | Default chunk size |
@@ -242,15 +284,15 @@ Key environment variables (see [`.env.example`](../.env.example) for the full li
 
 ## 8. API Routing
 
-`api/app.py` is intentionally minimal: it mounts the routers and wires the observability connection string. Route definitions live in `api/routes/`.
+`src/app/api/app.py` is intentionally minimal: it mounts the routers and wires the observability connection string. Route definitions live in `src/app/api/routes/`.
 
 | Router | File | Endpoints |
 |---|---|---|
-| `query_routes` | `api/routes/query_routes.py` | `GET /`, `POST /query`, `POST /query-form` |
-| `document_routes` | `api/routes/document_routes.py` | `POST /upload`, `GET /documents/{id}/status`, `DELETE /documents/{id}`, `GET /supported-types` |
-| `table_routes` | `api/routes/table_routes.py` | `GET /tables`, `GET /tables/count`, `DELETE /table/{name}` |
-| `admin_routes` | `api/routes/admin_routes.py` | `GET /stats`, `GET /health` |
-| `observability_routes` | `api/routes/observability_routes.py` | `GET /observability/stats`, `GET /observability/history`, `GET /observability/metrics` |
+| `query_routes` | `src/app/api/routes/query_routes.py` | `GET /`, `POST /query`, `POST /query-form` |
+| `document_routes` | `src/app/api/routes/document_routes.py` | `POST /upload`, `GET /documents/{id}/status`, `DELETE /documents/{id}`, `GET /supported-types` |
+| `table_routes` | `src/app/api/routes/table_routes.py` | `GET /tables`, `GET /tables/count`, `DELETE /table/{name}` |
+| `admin_routes` | `src/app/api/routes/admin_routes.py` | `GET /stats`, `GET /health` |
+| `observability_routes` | `src/app/api/routes/observability_routes.py` | `GET /observability/stats`, `GET /observability/history`, `GET /observability/metrics` |
 
 Previously, routes were declared twice and only the wrapper versions were mounted. The refactor put all routing into the route modules and mounted them directly. New routes should be added with the standard FastAPI router decorators.
 
@@ -261,11 +303,11 @@ Previously, routes were declared twice and only the wrapper versions were mounte
 ### 9.1 Patterns used
 
 - **Factory Method**: `processor_factory.py` selects processor by file extension; `pdf_parser_factory.py` selects PDF backend; `chunker_factory.py` selects chunker strategy.
-- **Abstract Method**: `ingestion/processors/base_processor.py` defines the processor contract.
+- **Abstract Method**: `src/app/ingestion/processors/base_processor.py` defines the processor contract.
 - **Repository**: `IngestionRepository`, `TableRepository`, `VectorStore` encapsulate SQL.
 - **Lazy initialization**: pipeline and reranker are loaded on first use.
 - **Singleton / process-scoped cache**: `ConnectionPoolManager`, `_PIPELINES` caches.
-- **Dependency injection**: FastAPI `Depends` in `api/dependencies.py`.
+- **Dependency injection**: FastAPI `Depends` in `src/app/api/dependencies.py`.
 
 ### 9.2 Patterns to preserve
 
@@ -275,11 +317,20 @@ Previously, routes were declared twice and only the wrapper versions were mounte
 - **Always** use `async with self.connection()` in `VectorStore` so connections are released on exceptions and cancellation.
 - **Always** use immutable Celery signatures (`.si()`) for the ingestion chain.
 - **Always** validate table names before they reach SQL construction.
-- **Always** keep background tasks referenced until completion (see `_BACKGROUND_TASKS` in `retrieval/search.py`).
+- **Always** keep background tasks referenced until completion (see `_BACKGROUND_TASKS` in `src/app/retrieval/search.py`).
 
-### 9.3 Disabled / archived features
+### 9.3 Present but unwired features
 
-- **Knowledge graph**: full implementation exists in `.archive/graph_feature/` but is not wired into the active app. The `entities`/`relationships` system tables are referenced in safe-table guards but unused. The migration `001_create_graph_tables.sql` has a commented-out PageRank function.
+- **Knowledge graph**: the full implementation lives in the active tree — `src/app/graph/` (extractors, providers, graph service), `src/app/config/graph_config.py`, `src/app/models/graph_models.py`, `src/app/ingestion/extraction/`, and `src/app/api/routes/graph_routes.py`. It is **not reachable and not configured**:
+
+  - `graph_routes.router` is never mounted in `api/app.py`, so no `/graph` endpoint exists.
+  - No live module imports any graph module. Starting the API and the worker loads 53 `app.*` modules, none of them graph.
+  - Its schema is parked in `deploy/migrations/optional/`, a subdirectory Postgres' initdb ignores, so a fresh volume comes up with no `entities` / `relationships` tables.
+  - Its environment variables were removed from `docker-compose.yml` and `.env.example`; nothing outside `graph_config.py` reads them.
+
+  `tests/unit/test_graph_not_wired.py` asserts all four properties, so re-integration cannot happen silently. To enable the feature: mount the router, apply `deploy/migrations/optional/001_create_graph_tables.sql`, restore the settings it needs, and delete that test file in the same commit.
+
+  The `entities`/`relationships` names still appear in the safe-table denylists in `infra/db/identifiers.py` and `infra/db/table_repository.py`. Those are protective — they stop a user creating or dropping a chunk table under those names — and are kept deliberately.
 - **Celery `rag` queue**: removed; default queue is now `ingestion`.
 
 ---
@@ -298,18 +349,16 @@ Previously, routes were declared twice and only the wrapper versions were mounte
 
 ### 10.3 Pre-existing test failures
 
-At the time of the last refactor there were ~12 failures in the suite, all pre-existing and unrelated to the recent fixes:
+Running `tests/unit` locally gives 12 failures, all pre-existing and unrelated to the layout move:
 
-- `tests/unit/test_chunker_factory.py` (5)
+- `tests/unit/test_chunker_factory.py` (5, chonkie API drift — the local chonkie is newer than the pinned one)
 - `tests/unit/test_delete_table_security.py` (6, MagicMock/jsonable_encoder issue)
-- `tests/unit/test_app_config.py` (1, default model mismatch / environment-dependent)
-
-Additionally, `tests/unit/test_pdf_to_markdown.py` does not import because it targets a module deleted in an earlier refactor.
+- `tests/unit/test_llm_provider.py` (1, `test_generate_content_retries_on_error` — this file was archived with the graph feature and never ran until it was restored to `tests/unit/`)
 
 ### 10.4 UI / template debt
 
-- `api/renderer.py` / `api/templates/` use Jinja2 for HTML pages.
-- `api/routes/observability_routes.py` uses inline HTML strings (legacy) and should be migrated to templates.
+- `src/app/api/renderer.py` / `src/app/api/templates/` use Jinja2 for HTML pages.
+- `src/app/api/routes/observability_routes.py` uses inline HTML strings (legacy) and should be migrated to templates.
 
 ### 10.5 Hardcoded values that should be configurable
 
@@ -318,7 +367,7 @@ Additionally, `tests/unit/test_pdf_to_markdown.py` does not import because it ta
 - `batch_size=32` (embed) and `100` (insert) in `vector_store.py`
 - `chars_per_page=2500` in `docx_processor.py`
 - `h1/h2/h3_min_height` in `gemini_docling_parser.py`
-- `max_file_size_mb=50` in `models/schemas.py`
+- `max_file_size_mb=50` in `src/app/models/schemas.py`
 
 See `docs/20260802_project_refactoring.md` "Future Work" for the full list.
 
@@ -330,9 +379,9 @@ See `docs/20260802_project_refactoring.md` "Future Work" for the full list.
 
 1. Read this file.
 2. Decide whether the feature touches ingestion, query, or admin/observability.
-3. Look at the relevant route module in `api/routes/`.
-4. Trace into the domain layer: `ingestion/`, `retrieval/`, or `infra/db/`.
-5. If it runs in background, add tasks in `worker/ingestion_tasks.py` and update `celery_app.py` schedules/queues.
+3. Look at the relevant route module in `src/app/api/routes/`.
+4. Trace into the domain layer: `src/app/ingestion/`, `src/app/retrieval/`, or `src/app/infra/db/`.
+5. If it runs in background, add tasks in `src/app/worker/ingestion_tasks.py` and update `celery_app.py` schedules/queues.
 6. Add tests in `tests/unit/` (fast) or `tests/integration/` (requires Postgres).
 7. Update this document if the architecture changes.
 
@@ -347,7 +396,7 @@ See `docs/20260802_project_refactoring.md` "Future Work" for the full list.
 
 ```bash
 # All tests in Docker
-make -f deployment/Makefile test-docker
+make -f deploy/deployment/Makefile test-docker
 
 # Unit tests only (no DB)
 python -m pytest tests/unit -v --ignore=tests/unit/test_pdf_to_markdown.py
@@ -391,4 +440,23 @@ See `docs/20260802_project_refactoring.md`, `docs/20260802_architecture_review_f
 
 ---
 
-**Last updated**: 2026-08-02
+---
+
+## 14. Layout Move (2026-08-03)
+
+- All application packages moved under `src/app/`; every import is now `app.*`. No
+  compatibility shims were left at the old paths.
+- Celery task names moved with them (`app.worker.ingestion_tasks.*`), and
+  `celery_app.include` / the beat schedule were updated to match.
+- The knowledge graph feature came out of `.archive/` into the active tree,
+  still unmounted, with its migration moved to `migrations/optional/` and its
+  environment variables removed from compose and `.env.example` (see 9.3).
+- `deployment/` and `migrations/` moved under `deploy/`.
+- `experiment/` renamed to `experiments/`.
+- Added `data/parsed/` and `data/chunks/` artifacts (see 4.2b).
+- `Dockerfile.test` now installs `requirements.txt`. It never did, so the whole
+  `make test-docker` path failed at `import dotenv` before this.
+
+---
+
+**Last updated**: 2026-08-03

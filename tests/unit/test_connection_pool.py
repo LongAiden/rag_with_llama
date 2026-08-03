@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 @pytest.mark.asyncio
 async def test_pool_is_created_with_a_json_codec_initialiser():
     """create_pool must receive an init callback, or JSONB columns break."""
-    from infra.db.pool import ConnectionPoolManager
+    from app.infra.db.pool import ConnectionPoolManager
 
     pool = MagicMock()
     with patch("asyncpg.create_pool", AsyncMock(return_value=pool)) as mock_create:
@@ -31,7 +31,7 @@ async def test_pool_is_created_with_a_json_codec_initialiser():
 @pytest.mark.asyncio
 async def test_init_registers_json_and_jsonb_codecs():
     """Both json and jsonb are registered, with json.dumps/loads round-tripping."""
-    from infra.db.pool import _init_connection
+    from app.infra.db.pool import _init_connection
 
     conn = MagicMock()
     conn.set_type_codec = AsyncMock()
@@ -49,7 +49,7 @@ async def test_init_registers_json_and_jsonb_codecs():
 @pytest.mark.asyncio
 async def test_codec_round_trips_the_ingestion_artifact_shapes():
     """The encoder/decoder pair must survive the shapes the pipeline stores."""
-    from infra.db.pool import _init_connection
+    from app.infra.db.pool import _init_connection
 
     conn = MagicMock()
     conn.set_type_codec = AsyncMock()

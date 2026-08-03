@@ -8,7 +8,7 @@ import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-from ingestion.embedding.generator import EmbeddingGenerator
+from app.ingestion.embedding.generator import EmbeddingGenerator
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def mock_sentence_transformer():
 @pytest.fixture
 def generator(mock_sentence_transformer):
     """Create an EmbeddingGenerator with a mocked model."""
-    with patch('ingestion.embedding.generator.SentenceTransformer') as mock_cls:
+    with patch('app.ingestion.embedding.generator.SentenceTransformer') as mock_cls:
         mock_cls.return_value = mock_sentence_transformer(embedding_dim=384)
         gen = EmbeddingGenerator(model_name='all-MiniLM-L6-v2')
         yield gen
@@ -66,7 +66,7 @@ class TestEmbeddingGeneratorInitialization:
 
     def test_custom_model_initialization(self, mock_sentence_transformer):
         """Test initialization with a different model name."""
-        with patch('ingestion.embedding.generator.SentenceTransformer') as mock_cls:
+        with patch('app.ingestion.embedding.generator.SentenceTransformer') as mock_cls:
             mock_cls.return_value = mock_sentence_transformer(embedding_dim=512)
             gen = EmbeddingGenerator(model_name='custom-model')
             assert gen.embedding_dim == 512

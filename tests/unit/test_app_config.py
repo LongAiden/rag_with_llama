@@ -16,7 +16,7 @@ class TestDatabaseConfig:
     def test_default_values(self):
         """Test that DatabaseConfig has correct default values."""
         with patch.dict(os.environ, {}, clear=True):
-            from config.app_config import DatabaseConfig
+            from app.config.app_config import DatabaseConfig
             config = DatabaseConfig()
 
             assert config.host == 'localhost'
@@ -28,7 +28,7 @@ class TestDatabaseConfig:
     def test_to_dict(self):
         """Test that to_dict returns correct format."""
         with patch.dict(os.environ, {}, clear=True):
-            from config.app_config import DatabaseConfig
+            from app.config.app_config import DatabaseConfig
             config = DatabaseConfig()
             result = config.to_dict()
 
@@ -49,7 +49,7 @@ class TestDatabaseConfig:
             'POSTGRES_PASSWORD': 'custom_pass'
         }
         with patch.dict(os.environ, env_vars, clear=True):
-            from config.app_config import DatabaseConfig
+            from app.config.app_config import DatabaseConfig
 
             config = DatabaseConfig()
 
@@ -66,7 +66,7 @@ class TestAppSettings:
     def test_default_gemini_model(self):
         """Test that AppSettings has correct default Gemini model."""
         with patch.dict(os.environ, {}, clear=True):
-            from config.app_config import AppSettings
+            from app.config.app_config import AppSettings
             settings = AppSettings()
 
             assert settings.gemini_model == 'gemini-2.5-flash'
@@ -74,7 +74,7 @@ class TestAppSettings:
     def test_loads_google_api_key(self):
         """Test that AppSettings loads Google API key from environment."""
         with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-api-key'}, clear=True):
-            from config.app_config import AppSettings
+            from app.config.app_config import AppSettings
             settings = AppSettings()
 
             assert settings.google_api_key == 'test-api-key'
@@ -82,7 +82,7 @@ class TestAppSettings:
     def test_loads_logfire_token(self):
         """Test that AppSettings loads Logfire token from environment."""
         with patch.dict(os.environ, {'LOGFIRE_WRITE_TOKEN': 'test-token'}, clear=True):
-            from config.app_config import AppSettings
+            from app.config.app_config import AppSettings
             settings = AppSettings()
 
             assert settings.logfire_write_token == 'test-token'
@@ -94,7 +94,7 @@ class TestGetOllamaModel:
     def test_returns_default_when_not_set(self):
         """Test that get_ollama_model returns default when not configured."""
         with patch.dict(os.environ, {}, clear=True):
-            from config.app_config import get_ollama_model
+            from app.config.app_config import get_ollama_model
             result = get_ollama_model()
 
             assert result == 'deepseek-r1:1.5b'
@@ -102,7 +102,7 @@ class TestGetOllamaModel:
     def test_returns_configured_value(self):
         """Test that get_ollama_model returns configured value."""
         with patch.dict(os.environ, {'OLLAMA_MODEL': 'llama3.2'}, clear=True):
-            from config.app_config import get_ollama_model
+            from app.config.app_config import get_ollama_model
             result = get_ollama_model()
 
             assert result == 'llama3.2'

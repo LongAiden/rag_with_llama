@@ -7,7 +7,7 @@ Covers:
 import pytest
 import numpy as np
 
-from retrieval.utils import merge_with_rrf
+from app.retrieval.utils import merge_with_rrf
 
 
 class TestMergeWithRRF:

@@ -9,8 +9,8 @@ import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from ingestion.embedding.vector_store import VectorStore
-from ingestion.embedding.chunk import Chunk
+from app.ingestion.embedding.vector_store import VectorStore
+from app.ingestion.embedding.chunk import Chunk
 
 
 @pytest.fixture
@@ -87,7 +87,7 @@ class TestVectorStoreAddChunks:
         """Test that add_chunks inserts chunk data into the DB."""
         pool, conn = mock_pool
 
-        with patch('ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
+        with patch('app.ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
             mock_mgr.get_pool = AsyncMock(return_value=pool)
 
             await vector_store.add_chunks(mock_chunks)
@@ -133,7 +133,7 @@ class TestVectorStoreSearch:
         }
         conn.fetch = AsyncMock(return_value=[mock_row])
 
-        with patch('ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
+        with patch('app.ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
             mock_mgr.get_pool = AsyncMock(return_value=pool)
 
             results = await vector_store.search_similar_chunks(
@@ -154,7 +154,7 @@ class TestVectorStoreSearch:
         pool, conn = mock_pool
         conn.fetch = AsyncMock(return_value=[])
 
-        with patch('ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
+        with patch('app.ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
             mock_mgr.get_pool = AsyncMock(return_value=pool)
 
             await vector_store.search_similar_chunks(
@@ -177,7 +177,7 @@ class TestVectorStoreDelete:
         pool, conn = mock_pool
         conn.execute = AsyncMock(return_value="DELETE 5")
 
-        with patch('ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
+        with patch('app.ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
             mock_mgr.get_pool = AsyncMock(return_value=pool)
 
             deleted = await vector_store.delete_document_chunks("doc_1")
@@ -207,7 +207,7 @@ class TestVectorStoreStats:
         }[key]
         conn.fetchrow = AsyncMock(return_value=mock_row)
 
-        with patch('ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
+        with patch('app.ingestion.embedding.vector_store.ConnectionPoolManager') as mock_mgr:
             mock_mgr.get_pool = AsyncMock(return_value=pool)
 
             stats = await vector_store.get_collection_stats()
