@@ -102,6 +102,25 @@ class AppSettings(BaseSettings):
     default_chunk_size: int = Field(default=512, validation_alias='DEFAULT_CHUNK_SIZE')
     default_parse_backend: str = Field(default='ollama', validation_alias='DEFAULT_PARSE_BACKEND')
 
+    # PDF parse tuning. Defaults reproduce the previously hardcoded values
+    # exactly, so exposing them changes no behaviour — they exist so the
+    # CPU/thread and VLM-concurrency experiments are .env changes rather than
+    # code edits. See docs/20260804_ingestion_performance_investigation.md.
+    docling_num_threads: int = Field(default=2, validation_alias='DOCLING_NUM_THREADS')
+    docling_page_batch_size: int = Field(default=50, validation_alias='DOCLING_PAGE_BATCH_SIZE')
+    # 1: Ollama runs on the same host and serializes on one GPU. Measured on an
+    # M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+    vlm_concurrency: int = Field(default=1, validation_alias='VLM_CONCURRENCY')
+    # qwen3.5 is a reasoning model and Ollama defaults thinking on: 87s/call
+    # versus 2.3s, with the reasoning discarded unread. Tables additionally came
+    # back empty every time thinking was on.
+    ollama_vlm_think: bool = Field(default=False, validation_alias='OLLAMA_VLM_THINK')
+    # Tables go to docling's TableFormer. A 0.8B VLM cannot read them — on
+    # bert.pdf the 13-column GLUE table came back with headers "I, II, III, IV…"
+    # and a small table came back with invented rows. Set true to restore the
+    # old behaviour of routing complex tables to the VLM.
+    vlm_tables: bool = Field(default=False, validation_alias='VLM_TABLES')
+
     # Langfuse observability (optional)
     langfuse_host: Optional[str] = Field(default=None, validation_alias='LANGFUSE_HOST')
     langfuse_public_key: Optional[str] = Field(default=None, validation_alias='LANGFUSE_PUBLIC_KEY')

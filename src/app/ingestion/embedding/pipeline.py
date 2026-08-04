@@ -135,8 +135,18 @@ class ChunkEmbeddingPipeline:
             settings = AppSettings()
             backend = parse_backend or settings.pdf_parser_backend
             parser = create_pdf_parser(backend, settings)
-            parsed_text = parser.parse_pdf(str(file_path), output_path=None)
             parser_used = parser.get_backend_name()
+            # Off the event loop: parse_pdf is synchronous and can run for the
+            # better part of an hour, during which the asyncpg pool would
+            # otherwise be unable to service anything.
+            with logfire.span(
+                "parse_pdf",
+                document_id=document_id,
+                filename=filename,
+                backend=parser_used,
+                file_size=file_size,
+            ):
+                parsed_text = await asyncio.to_thread(parser.parse_pdf, str(file_path), None)
             page_mapping: List[Any] = []
         else:
             processor = get_processor_for_file(str(file_path))

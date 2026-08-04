@@ -13,7 +13,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "1.0"
           memory: 1G
         reservations:
           cpus: "0.5"
@@ -76,7 +76,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "1.0"
           memory: 1G
         reservations:
           cpus: "0.5"
@@ -121,9 +121,40 @@ services:
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
-      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      # 180, not 30: a 500-page parse runs ~60 minutes, and a shorter timeout
+      # lets the 6-hourly recovery sweep declare a live parse stale, re-dispatch a
+      # second conversion of the same document, and burn the retry budget.
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-180}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
       DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+
+      # PDF parse tuning. These defaults reproduce the previously hardcoded
+      # values exactly; they are here so the CPU/thread and VLM-concurrency
+      # experiments are env changes rather than code edits.
+      # 4, targeting the M1's 4 performance cores, with slack left inside the
+      # 4.0 CPU quota for the orchestrating thread and asyncpg — Docker enforces
+      # --cpus as a CFS bandwidth quota, so saturating it throttles everything
+      # else in the container rather than just failing to help.
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      # 1, not 2: Ollama runs on the same host and serializes on one GPU.
+      # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+      VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
+      # qwen3.5 is a reasoning model and Ollama defaults thinking ON. Measured
+      # on a real BERT table crop: 87.35s versus 2.27s, with the reasoning
+      # discarded unread. Tables additionally returned empty every time.
+      OLLAMA_VLM_THINK: ${OLLAMA_VLM_THINK:-false}
+      # Tables go to docling's TableFormer. A 0.8B VLM cannot read them: on
+      # bert.pdf the 13-column GLUE table came back with headers "I, II, III…"
+      # and a small table came back with invented rows. Set true to restore the
+      # old behaviour of routing complex tables to the VLM.
+      VLM_TABLES: ${VLM_TABLES:-false}
+
+      # The runtime image ships without a compiler by design, so a downstream
+      # torch.compile path (torchvision NMS during docling's layout pass) dies
+      # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
+      # eager execution costs nothing and removes the crash.
+      TORCHDYNAMO_DISABLE: "1"
     ports:
       - "8000:8000"
     volumes:
@@ -162,7 +193,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "4.0"
           memory: 2.5G
         reservations:
           cpus: "0.5"
@@ -188,9 +219,40 @@ services:
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
-      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      # 180, not 30: a 500-page parse runs ~60 minutes, and a shorter timeout
+      # lets the 6-hourly recovery sweep declare a live parse stale, re-dispatch a
+      # second conversion of the same document, and burn the retry budget.
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-180}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
       DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+
+      # PDF parse tuning. These defaults reproduce the previously hardcoded
+      # values exactly; they are here so the CPU/thread and VLM-concurrency
+      # experiments are env changes rather than code edits.
+      # 4, targeting the M1's 4 performance cores, with slack left inside the
+      # 4.0 CPU quota for the orchestrating thread and asyncpg — Docker enforces
+      # --cpus as a CFS bandwidth quota, so saturating it throttles everything
+      # else in the container rather than just failing to help.
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      # 1, not 2: Ollama runs on the same host and serializes on one GPU.
+      # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+      VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
+      # qwen3.5 is a reasoning model and Ollama defaults thinking ON. Measured
+      # on a real BERT table crop: 87.35s versus 2.27s, with the reasoning
+      # discarded unread. Tables additionally returned empty every time.
+      OLLAMA_VLM_THINK: ${OLLAMA_VLM_THINK:-false}
+      # Tables go to docling's TableFormer. A 0.8B VLM cannot read them: on
+      # bert.pdf the 13-column GLUE table came back with headers "I, II, III…"
+      # and a small table came back with invented rows. Set true to restore the
+      # old behaviour of routing complex tables to the VLM.
+      VLM_TABLES: ${VLM_TABLES:-false}
+
+      # The runtime image ships without a compiler by design, so a downstream
+      # torch.compile path (torchvision NMS during docling's layout pass) dies
+      # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
+      # eager execution costs nothing and removes the crash.
+      TORCHDYNAMO_DISABLE: "1"
     volumes:
       - .:/app
       - ./logs:/app/logs
@@ -218,7 +280,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "4.0"
           memory: 2.5G
         reservations:
           cpus: "0.5"
@@ -244,9 +306,40 @@ services:
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
-      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      # 180, not 30: a 500-page parse runs ~60 minutes, and a shorter timeout
+      # lets the 6-hourly recovery sweep declare a live parse stale, re-dispatch a
+      # second conversion of the same document, and burn the retry budget.
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-180}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
       DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+
+      # PDF parse tuning. These defaults reproduce the previously hardcoded
+      # values exactly; they are here so the CPU/thread and VLM-concurrency
+      # experiments are env changes rather than code edits.
+      # 4, targeting the M1's 4 performance cores, with slack left inside the
+      # 4.0 CPU quota for the orchestrating thread and asyncpg — Docker enforces
+      # --cpus as a CFS bandwidth quota, so saturating it throttles everything
+      # else in the container rather than just failing to help.
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      # 1, not 2: Ollama runs on the same host and serializes on one GPU.
+      # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+      VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
+      # qwen3.5 is a reasoning model and Ollama defaults thinking ON. Measured
+      # on a real BERT table crop: 87.35s versus 2.27s, with the reasoning
+      # discarded unread. Tables additionally returned empty every time.
+      OLLAMA_VLM_THINK: ${OLLAMA_VLM_THINK:-false}
+      # Tables go to docling's TableFormer. A 0.8B VLM cannot read them: on
+      # bert.pdf the 13-column GLUE table came back with headers "I, II, III…"
+      # and a small table came back with invented rows. Set true to restore the
+      # old behaviour of routing complex tables to the VLM.
+      VLM_TABLES: ${VLM_TABLES:-false}
+
+      # The runtime image ships without a compiler by design, so a downstream
+      # torch.compile path (torchvision NMS during docling's layout pass) dies
+      # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
+      # eager execution costs nothing and removes the crash.
+      TORCHDYNAMO_DISABLE: "1"
     volumes:
       - .:/app
       - ./logs:/app/logs
@@ -295,9 +388,40 @@ services:
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
       INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
-      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-30}
+      # 180, not 30: a 500-page parse runs ~60 minutes, and a shorter timeout
+      # lets the 6-hourly recovery sweep declare a live parse stale, re-dispatch a
+      # second conversion of the same document, and burn the retry budget.
+      INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-180}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
       DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+
+      # PDF parse tuning. These defaults reproduce the previously hardcoded
+      # values exactly; they are here so the CPU/thread and VLM-concurrency
+      # experiments are env changes rather than code edits.
+      # 4, targeting the M1's 4 performance cores, with slack left inside the
+      # 4.0 CPU quota for the orchestrating thread and asyncpg — Docker enforces
+      # --cpus as a CFS bandwidth quota, so saturating it throttles everything
+      # else in the container rather than just failing to help.
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      # 1, not 2: Ollama runs on the same host and serializes on one GPU.
+      # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+      VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
+      # qwen3.5 is a reasoning model and Ollama defaults thinking ON. Measured
+      # on a real BERT table crop: 87.35s versus 2.27s, with the reasoning
+      # discarded unread. Tables additionally returned empty every time.
+      OLLAMA_VLM_THINK: ${OLLAMA_VLM_THINK:-false}
+      # Tables go to docling's TableFormer. A 0.8B VLM cannot read them: on
+      # bert.pdf the 13-column GLUE table came back with headers "I, II, III…"
+      # and a small table came back with invented rows. Set true to restore the
+      # old behaviour of routing complex tables to the VLM.
+      VLM_TABLES: ${VLM_TABLES:-false}
+
+      # The runtime image ships without a compiler by design, so a downstream
+      # torch.compile path (torchvision NMS during docling's layout pass) dies
+      # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
+      # eager execution costs nothing and removes the crash.
+      TORCHDYNAMO_DISABLE: "1"
     volumes:
       - .:/app
       - ./logs:/app/logs
@@ -318,6 +442,8 @@ services:
   langfuse:
     image: langfuse/langfuse:2.80
     container_name: rag_langfuse
+    profiles:
+      - observability  # Only start with: docker compose --profile observability up
     deploy:
       resources:
         limits:

@@ -52,11 +52,11 @@ async def get_database_stats(config=Depends(get_config)):
                 for table_name in table_names:
                     result = await repo.get_table_stats(table_name)
 
-                    total_docs += result['docs'] or 0
+                    total_docs += result['documents'] or 0
                     total_chunks += result['chunks'] or 0
                     total_text_length += result['total_text_length'] or 0
 
-                    print(f"  {table_name}: {result['docs']} docs, {result['chunks']} chunks")
+                    print(f"  {table_name}: {result['documents']} docs, {result['chunks']} chunks")
 
                     if result['earliest'] and (earliest is None or result['earliest'] < earliest):
                         earliest = result['earliest']

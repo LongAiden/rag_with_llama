@@ -20,6 +20,7 @@ import asyncio
 import logging
 import mimetypes
 import os
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -152,12 +153,19 @@ async def _run_stage(
         )
         return {"status": "skipped", "stage": stage_name, "document_id": doc_id}
 
+    started = time.monotonic()
     try:
-        return await work(repo, config, doc)
+        result = await work(repo, config, doc)
     except Exception as exc:
-        logger.exception("Stage %s failed for %s", stage_name, doc_id)
+        logger.exception(
+            "Stage %s failed for %s after %.1fs", stage_name, doc_id, time.monotonic() - started
+        )
         await repo.record_error(doc_id, str(exc), MAX_ATTEMPTS, stage=stage_name)
         raise
+    logger.info(
+        "Stage %s completed for %s in %.1fs", stage_name, doc_id, time.monotonic() - started
+    )
+    return result
 
 
 def _chunk_to_dict(chunk: Any) -> Dict[str, Any]:

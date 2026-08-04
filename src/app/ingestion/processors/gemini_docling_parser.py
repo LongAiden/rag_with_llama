@@ -1,8 +1,9 @@
 import re
 import time
 import logging
+import threading
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,29 @@ _DEFAULT_COMPLEX_TABLE_COLS = 6
 _DEFAULT_IMAGES_SCALE = 0.75
 _DEFAULT_MIN_IMAGE_PX = 150
 _DOCLING_PAGE_BATCH_SIZE = 50
-_VLM_CONCURRENCY = 2
+# 1, not 2: Ollama runs on the same host and serializes on one GPU. Measured on
+# an M1 with think disabled — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+_VLM_CONCURRENCY = 1
+_DEFAULT_DOCLING_NUM_THREADS = 2
+# Tables go to docling's TableFormer, not the VLM. See _process_page.
+_DEFAULT_VLM_TABLES = False
+
+
+def _rss_mb() -> float:
+    """Resident set size in MB, or 0.0 where /proc is unavailable.
+
+    Deliberately dependency-free (no psutil): the number is only needed inside
+    the Linux worker container, where it is what shows whether peak memory is
+    flat across batches or growing with total page count.
+    """
+    try:
+        with open("/proc/self/status", "r") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 0.0
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
@@ -134,53 +157,6 @@ def _detect_column_split(items: list, page_width: float) -> float | None:
     return None
 
 
-def _fix_markdown_headings(markdown: str) -> str:
-    """Reclassify heading levels using section-number depth (e.g. '2.' → ##, '2.1' → ###)."""
-    import re
-    # Matches numbered section patterns: '2.', '2.1', '2.1.1', etc.
-    _num_pat = re.compile(r'^(\d+\.(?:\d+\.)*)\s+\S')
-
-    def _depth_prefix(num_str: str) -> str:
-        depth = num_str.count('.')
-        return '#' * min(depth + 1, 4)  # 1 dot → ##, 2 dots → ###, 3+ → ####
-
-    lines, result, in_table = markdown.splitlines(), [], False
-    for line in lines:
-        s = line.strip()
-        if '<table>' in s:
-            in_table = True
-        if '</table>' in s:
-            in_table = False
-            result.append(line)
-            continue
-        if in_table:
-            result.append(line)
-            continue
-
-        # Rule A: existing heading — reclassify if text starts with a section number
-        m = re.match(r'^(#{1,6})\s+(.*)', s)
-        if m:
-            heading_text = m.group(2).strip()
-            nm = _num_pat.match(heading_text)
-            if nm:
-                prefix = _depth_prefix(nm.group(1))
-                result.append(f"{prefix} {heading_text}")
-                continue
-            result.append(line)
-            continue
-
-        # Rule B: plain text that looks like a numbered section heading
-        if len(s) <= 90 and _num_pat.match(s) and not s.startswith('|'):
-            nm = _num_pat.match(s)
-            prefix = _depth_prefix(nm.group(1))
-            result.append(f"{prefix} {s}")
-            continue
-
-        result.append(line)
-
-    return '\n'.join(result)
-
-
 def _normalize_tables_in_markdown(md: str) -> str:
     out, buf = [], []
 
@@ -273,6 +249,11 @@ class GeminiDoclingParser(PDFParserBase):
         h2_min_height: float = 11.0,
         h3_min_height: float = 9.0,
         min_image_px: int = _DEFAULT_MIN_IMAGE_PX,
+        max_pages: Optional[int] = None,
+        docling_num_threads: int = _DEFAULT_DOCLING_NUM_THREADS,
+        page_batch_size: int = _DOCLING_PAGE_BATCH_SIZE,
+        vlm_concurrency: int = _VLM_CONCURRENCY,
+        vlm_tables: bool = _DEFAULT_VLM_TABLES,
     ):
         self._api_key = api_key
         self._gemini_model = gemini_model
@@ -284,8 +265,20 @@ class GeminiDoclingParser(PDFParserBase):
         self._h2_min_height = h2_min_height
         self._h3_min_height = h3_min_height
         self._min_image_px = min_image_px
+        self._max_pages = max_pages
+        self._docling_num_threads = docling_num_threads
+        self._page_batch_size = page_batch_size
+        self._vlm_concurrency = vlm_concurrency
+        self._vlm_tables = vlm_tables
         self._genai_model = None
+
+        # VLM counters are written from `vlm_concurrency` pool threads. Without
+        # the lock they silently under-report, which would defeat the whole
+        # point of measuring the VLM share of the parse.
+        self._vlm_stats_lock = threading.Lock()
         self._vlm_calls: int = 0
+        self._vlm_seconds: float = 0.0
+        self._vlm_failures: int = 0
 
     def get_backend_name(self) -> str:
         return "gemini-docling"
@@ -303,7 +296,7 @@ class GeminiDoclingParser(PDFParserBase):
         opts.do_table_structure = True
         opts.table_structure_options = TableStructureOptions(do_cell_matching=True)
         opts.accelerator_options = AcceleratorOptions(
-            num_threads=2, device=AcceleratorDevice.AUTO
+            num_threads=self._docling_num_threads, device=AcceleratorDevice.AUTO
         )
         opts.generate_page_images = True
         opts.generate_picture_images = True
@@ -322,17 +315,29 @@ class GeminiDoclingParser(PDFParserBase):
         self._genai_model = genai.GenerativeModel(self._gemini_model)
         return self._genai_model
 
+    def _record_vlm_call(self, elapsed: float, failed: bool = False) -> int:
+        """Accumulate VLM timing under the lock; returns the new call count."""
+        with self._vlm_stats_lock:
+            self._vlm_calls += 1
+            self._vlm_seconds += elapsed
+            if failed:
+                self._vlm_failures += 1
+            return self._vlm_calls
+
     def _call_gemini(self, pil_img: PILImage.Image, prompt: str, retries: int = 3) -> str:
         self._rate_limiter.wait()
         model = self._get_model()
         for attempt in range(retries):
+            started = time.monotonic()
             try:
-                self._vlm_calls += 1
-                return model.generate_content([pil_img, prompt]).text
+                text = model.generate_content([pil_img, prompt]).text
+                self._record_vlm_call(time.monotonic() - started)
+                return text
             except Exception as exc:
                 err = str(exc).lower()
                 if "429" in err or "quota" in err or "resource_exhausted" in err:
                     if "per_day" in err or "day" in err:
+                        self._record_vlm_call(time.monotonic() - started, failed=True)
                         raise RuntimeError("[Gemini] Daily quota exhausted.") from exc
                     wait = 60
                     logger.warning(f"RPM limit hit (attempt {attempt+1}/{retries}), waiting {wait}s …")
@@ -340,7 +345,9 @@ class GeminiDoclingParser(PDFParserBase):
                     self._rate_limiter._calls.clear()
                     self._rate_limiter.wait()
                 else:
+                    self._record_vlm_call(time.monotonic() - started, failed=True)
                     raise
+        self._record_vlm_call(0.0, failed=True)
         raise RuntimeError(f"Gemini call failed after {retries} retries")
 
     def _call_vlm(self, pil_img: PILImage.Image, prompt: str) -> str:
@@ -482,7 +489,13 @@ class GeminiDoclingParser(PDFParserBase):
                     md = self._call_vlm(pil, _VLM_IMAGE_PROMPT).strip()
                     ordered.append((col, y, x, md))
 
-            elif isinstance(item, TableItem) and self._is_complex_table(item):
+            # Tables go to docling's TableFormer unless the VLM is explicitly
+            # opted in. Measured on bert.pdf with qwen3.5:0.8b: the 13-column
+            # GLUE table came back with headers "I, II, III, IV…", and a small
+            # table came back with invented rows. The old rule sent only tables
+            # with >8 rows AND >6 cols here — i.e. the hardest ones to the
+            # weakest extractor.
+            elif isinstance(item, TableItem) and self._vlm_tables and self._is_complex_table(item):
                 pil = item.get_image(doc)
                 if pil is None:
                     logger.warning(f"  p{page_no}: complex table has no image, falling back to Docling")
@@ -564,136 +577,137 @@ class GeminiDoclingParser(PDFParserBase):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def parse_pdf(self, path: str | Path, output_path: Optional[str | Path] = None) -> str:
-        """Parse a PDF to markdown using Docling + Gemini with page-batched conversion."""
-        self._vlm_calls = 0
-        pdf_path = str(path)
+        """Parse a PDF to markdown, one page batch at a time.
 
-        logger.info(f"═══ GeminiDoclingParser: {Path(pdf_path).name} ═══")
+        Each batch is converted, assembled and released before the next
+        `convert()` runs, so peak memory is O(batch size) rather than
+        O(total pages): the `DoclingDocument`s — and the rendered page images
+        they carry — are never all alive at once.
+        """
+        with self._vlm_stats_lock:
+            self._vlm_calls = 0
+            self._vlm_seconds = 0.0
+            self._vlm_failures = 0
+
+        pdf_path = str(path)
+        name = Path(pdf_path).name
+        started = time.monotonic()
 
         total_pages = self._count_pages(pdf_path)
-        logger.info(f"Total pages: {total_pages}, batch size: {_DOCLING_PAGE_BATCH_SIZE}")
+        if self._max_pages is not None:
+            total_pages = min(total_pages, self._max_pages)
+
+        logger.info(
+            f"═══ {self.get_backend_name()}: {name} — {total_pages} pages, "
+            f"batch={self._page_batch_size}, vlm_concurrency={self._vlm_concurrency} ═══"
+        )
 
         converter = self._build_converter()
-        
-        logger.info("Step 1/3  Docling converting (page-batched) …")
-        batch_docs = {}
-        
-        for batch_start in range(1, total_pages + 1, _DOCLING_PAGE_BATCH_SIZE):
-            batch_end = min(batch_start + _DOCLING_PAGE_BATCH_SIZE - 1, total_pages)
-            logger.info(f"  Converting pages {batch_start}-{batch_end}...")
-            
-            conv = converter.convert(pdf_path, page_range=(batch_start, batch_end))
-            doc = conv.document
-            batch_docs[(batch_start, batch_end)] = doc
-        
-        logger.info("Step 2/3  Grouping elements by page …")
-        page_items: dict[int, list] = defaultdict(list)
-        page_doc_map: dict[int, any] = {}
-        
-        for (batch_start, batch_end), doc in batch_docs.items():
-            for item, _level in doc.iterate_items():
-                if item.prov:
-                    page_no = item.prov[0].page_no
-                    page_items[page_no].append(item)
-                    page_doc_map[page_no] = doc
 
-        total_items = sum(len(v) for v in page_items.values())
-        logger.info(f"{total_pages} pages, {total_items} elements")
-
-        logger.info("Step 3/3  Assembling pages …")
-        pages_md = []
+        pages_md: list[str] = []
         out_file = None
-
         if output_path:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out_file = open(output_path, "w", encoding="utf-8")
 
+        docling_seconds = 0.0
+        assembly_seconds = 0.0
+        peak_rss = _rss_mb()
+
         try:
-            with ThreadPoolExecutor(max_workers=_VLM_CONCURRENCY) as executor:
-                for page_no in range(1, total_pages + 1):
-                    print(f"[{page_no}/{total_pages}] … ", end="", flush=True)
-                    try:
-                        doc = page_doc_map.get(page_no)
-                        if not doc:
-                            logger.warning(f"  p{page_no}: no document found, skipping")
+            with ThreadPoolExecutor(max_workers=self._vlm_concurrency) as executor:
+                for batch_start in range(1, total_pages + 1, self._page_batch_size):
+                    batch_end = min(batch_start + self._page_batch_size - 1, total_pages)
+                    batch_pages = batch_end - batch_start + 1
+
+                    convert_started = time.monotonic()
+                    doc = converter.convert(pdf_path, page_range=(batch_start, batch_end)).document
+                    convert_elapsed = time.monotonic() - convert_started
+                    docling_seconds += convert_elapsed
+
+                    # Page numbers stay absolute inside a page_range slice, so
+                    # `prov[0].page_no` needs no per-batch offset.
+                    page_items: dict[int, list] = defaultdict(list)
+                    for item, _level in doc.iterate_items():
+                        if item.prov:
+                            page_items[item.prov[0].page_no].append(item)
+
+                    rss = _rss_mb()
+                    peak_rss = max(peak_rss, rss)
+                    logger.info(
+                        f"Converted pages {batch_start}-{batch_end}: "
+                        f"elapsed={convert_elapsed:.1f}s "
+                        f"rate={convert_elapsed / max(batch_pages, 1):.2f}s/page "
+                        f"rss={rss:.0f}MB"
+                    )
+
+                    assemble_started = time.monotonic()
+                    for page_no in range(batch_start, batch_end + 1):
+                        page_started = time.monotonic()
+                        try:
+                            page_md = self._process_page(
+                                page_no=page_no,
+                                items=page_items.get(page_no, []),
+                                doc=doc,
+                                executor=executor,
+                            )
+                            page_md = _normalize_tables_in_markdown(page_md)
+                            page_md = _clean_html(page_md)
+                            page_md = _fix_table_closing_tags(page_md)
+
+                            chunk = page_md + "\n\n---\n\n"
+                            pages_md.append(chunk)
+                            if out_file:
+                                out_file.write(chunk)
+                                out_file.flush()
+                        except Exception as exc:
+                            logger.error(f"[page {page_no}] {exc}", exc_info=True)
                             continue
-                        
-                        page_md = self._process_page(
-                            page_no=page_no,
-                            items=page_items.get(page_no, []),
-                            doc=doc,
-                            executor=executor
-                        )
-                        page_md = _normalize_tables_in_markdown(page_md)
-                        page_md = _clean_html(page_md)
-                        page_md = _fix_table_closing_tags(page_md)
-                        chunk = page_md + "\n\n---\n\n"
-                        pages_md.append(chunk)
-                        if out_file:
-                            out_file.write(chunk)
-                            out_file.flush()
-                        print("done")
-                    except Exception as exc:
-                        print(f"ERROR: {exc}")
-                        logger.error(f"[page {page_no}] {exc}", exc_info=True)
+
+                        page_elapsed = time.monotonic() - page_started
+                        if page_elapsed > 1.0:
+                            with self._vlm_stats_lock:
+                                vlm_wait = self._vlm_seconds
+                            logger.info(
+                                f"[{page_no}/{total_pages}] elapsed={page_elapsed:.1f}s "
+                                f"vlm_wait={vlm_wait:.0f}s"
+                            )
+                    assembly_seconds += time.monotonic() - assemble_started
+
+                    # Release the batch before converting the next one. This is
+                    # what keeps peak memory flat in total page count; dropping
+                    # it is what made a 504-page PDF OOM the worker.
+                    del doc, page_items
+                    peak_rss = max(peak_rss, _rss_mb())
         finally:
             if out_file:
                 out_file.close()
 
         markdown = _fix_markdown_headings("".join(pages_md))
+
+        total_elapsed = time.monotonic() - started
+        with self._vlm_stats_lock:
+            vlm_calls = self._vlm_calls
+            vlm_seconds = self._vlm_seconds
+            vlm_failures = self._vlm_failures
+
+        def _pct(value: float) -> float:
+            return (value / total_elapsed * 100) if total_elapsed else 0.0
+
+        logger.info(
+            f"parse_pdf summary: {name} pages={total_pages} total={total_elapsed:.0f}s "
+            f"docling={docling_seconds:.0f}s ({_pct(docling_seconds):.0f}%) "
+            f"assembly={assembly_seconds:.0f}s ({_pct(assembly_seconds):.0f}%) "
+            f"vlm_wait={vlm_seconds:.0f}s vlm_calls={vlm_calls} "
+            f"vlm_failures={vlm_failures} peak_rss={peak_rss:.0f}MB"
+        )
+        if vlm_failures:
+            model = getattr(self, "_vlm_model", None) or self._gemini_model
+            logger.warning(
+                f"{vlm_failures}/{vlm_calls} VLM calls failed for {name} (model={model}) — "
+                f"those figures and tables fell back to [IMAGE]"
+            )
         if output_path:
             logger.info(f"Saved → {output_path}")
 
-        print(f"\nDone. Gemini calls: {self._vlm_calls}  |  pages: {total_pages}")
-        return markdown
-
-    def _parse_page_by_page(self, path: str | Path, output_path: Optional[str | Path] = None) -> str:
-        """
-        Alternative: converts one page at a time via docling page_range=(n, n).
-        Lower peak memory, but significantly slower for large documents.
-        Use only when memory is the bottleneck.
-        """
-        self._vlm_calls = 0
-        pdf_path = str(path)
-
-        total_pages = self._count_pages(pdf_path)
-        logger.info(f"Total pages: {total_pages}")
-
-        pages_md = []
-        out_file = None
-        if output_path:
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            out_file = open(output_path, "w", encoding="utf-8")
-
-        converter = self._build_converter()
-
-        try:
-            for page_no in range(1, total_pages + 1):
-                print(f"[{page_no}/{total_pages}] converting … ", end="", flush=True)
-                try:
-                    conv = converter.convert(pdf_path, page_range=(page_no, page_no))
-                    doc = conv.document
-                    items = [item for item, _ in doc.iterate_items() if item.prov]
-                    page_md = self._process_page(page_no=page_no, items=items, doc=doc)
-                    page_md = _normalize_tables_in_markdown(page_md)
-                    page_md = _clean_html(page_md)
-                    page_md = _fix_table_closing_tags(page_md)
-                    chunk = page_md + "\n\n---\n\n"
-                    pages_md.append(chunk)
-                    if out_file:
-                        out_file.write(chunk)
-                        out_file.flush()
-                    print("done")
-                except Exception as exc:
-                    print(f"ERROR: {exc}")
-                    logger.error(f"[page {page_no}] {exc}", exc_info=True)
-        finally:
-            if out_file:
-                out_file.close()
-
-        markdown = _fix_markdown_headings("".join(pages_md))
-        if output_path:
-            logger.info(f"Saved → {output_path}")
-
-        print(f"\nDone. Gemini calls: {self._vlm_calls}  |  pages: {total_pages}")
         return markdown

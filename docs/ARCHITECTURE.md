@@ -367,7 +367,13 @@ Running `tests/unit` locally gives 12 failures, all pre-existing and unrelated t
 - `batch_size=32` (embed) and `100` (insert) in `vector_store.py`
 - `chars_per_page=2500` in `docx_processor.py`
 - `h1/h2/h3_min_height` in `gemini_docling_parser.py`
+- `images_scale` and `min_image_px` in `gemini_docling_parser.py` — deliberately still
+  constructor-only: they change output quality, not throughput, so they are not part
+  of the tuning surface (§15.5)
 - `max_file_size_mb=50` in `src/app/models/schemas.py`
+
+Resolved: `num_threads`, `_DOCLING_PAGE_BATCH_SIZE` and `_VLM_CONCURRENCY` are now
+`DOCLING_NUM_THREADS`, `DOCLING_PAGE_BATCH_SIZE` and `VLM_CONCURRENCY` (§15.5).
 
 See `docs/20260802_project_refactoring.md` "Future Work" for the full list.
 
@@ -463,10 +469,23 @@ See `docs/20260802_project_refactoring.md`, `docs/20260802_architecture_review_f
 
 ### 15.1 Parser Memory Optimization
 
+> **Corrected 2026-08-05.** The claim below that memory became "flat regardless of
+> document size" was **not true as originally implemented**. Page-batching bounded
+> docling's *working* memory but not its *retained* memory: `parse_pdf` converted
+> every batch up front into a `batch_docs` dict and never released any of them, so
+> all 10 `DoclingDocument`s of a 500-page PDF — and the rendered page images they
+> carry — were alive simultaneously and peak memory still scaled with total pages.
+> This is finding F4 in `docs/20260804_ingestion_performance_investigation.md`, and
+> it is why the worker kept being OOM-killed after the batching landed.
+>
+> `parse_pdf` now **streams**: each batch is converted, assembled (including VLM)
+> and released before the next `convert()` runs, which is what actually makes peak
+> memory O(batch size). See §15.7.
+
 Both PDF parsers (`GeminiDoclingParser` and `OllamaPDFParser`) now use **page-batched conversion** to prevent OOM kills on large documents:
 
-- **Batch size**: 50 pages per `convert()` call (configurable via `_DOCLING_PAGE_BATCH_SIZE`)
-- **Memory reduction**: Peak memory usage drops from ~1.9 GB (504-page document) to ~1.15 GB, flat regardless of document size
+- **Batch size**: 50 pages per `convert()` call (configurable via `DOCLING_PAGE_BATCH_SIZE`)
+- **Memory reduction**: Peak memory usage drops from ~1.9 GB (504-page document) to ~1.15 GB, flat regardless of document size *(only true since the streaming rewrite — see the note above)*
 - **Thread reduction**: `num_threads` reduced from 4 to 2 to match container CPU limits
 - **Image scale**: Reduced from 1.0 to 0.75 (Gemini) and 0.75 to 0.6 (Ollama) to cut page-image memory by 44%
 - **Minimum image size**: `min_image_px` increased from 0 to 150 to skip decorative icons and reduce VLM calls
@@ -540,11 +559,14 @@ The query pipeline now supports two selectable modes:
 
 ### 15.5 Configuration
 
-No new environment variables required. All changes use existing defaults:
-
 - `INGESTION_MAX_ATTEMPTS`: Default 2 (used by `reset_stale_claims()`)
-- `_DOCLING_PAGE_BATCH_SIZE`: Hardcoded 50 (can be made configurable if needed)
-- `_VLM_CONCURRENCY`: Hardcoded 2 (matches worker CPU limit)
+- `INGESTION_CLAIM_TIMEOUT_MINUTES`: **180** in `docker-compose.yml` (`AppSettings` default is still 30). Must exceed the worst-case parse: a 500-page PDF runs ~60 minutes, and at 30 the 6-hourly recovery sweep declared live parses stale, re-dispatched a duplicate conversion, and consumed the retry budget of a document that never failed.
+- `DOCLING_NUM_THREADS`: Default **2**. Docling's `AcceleratorOptions` thread count. Raising it does nothing unless the container's `cpus:` limit rises too, and vice versa.
+- `DOCLING_PAGE_BATCH_SIZE`: Default **50**. Pages per `convert()` call; sets peak parse memory now that batches are released as they finish.
+- `VLM_CONCURRENCY`: Default **2**. Parallel VLM calls. With Ollama on a separate host these are network waits, so higher values can pay off.
+- `TORCHDYNAMO_DISABLE`: **1** on all four app-image services. The runtime image ships without a C++ compiler by design, so a downstream `torch.compile` path (torchvision NMS inside docling's layout pass) crashes with `InvalidCxxCompiler`. Nothing in this repo calls `torch.compile`, so forcing eager execution removes the crash at no cost. An env change needs `docker compose up -d --force-recreate <service>` — a plain `restart` will not pick it up.
+
+The three parse-tuning defaults reproduce the values that were previously hardcoded, so exposing them changed no behaviour. They exist so the CPU/thread and VLM-concurrency experiments are `.env` changes rather than code edits.
 
 ### 15.6 Verification
 
@@ -564,6 +586,83 @@ docker inspect rag_celery_worker_ingestion --format '{{.State.OOMKilled}}'
 
 Test with the 504-page `NLTK.pdf` on both backends. Both should complete without OOM.
 
+### 15.7 Streaming parse, instrumentation and the F-series fixes (2026-08-05)
+
+Full diagnosis: **`docs/20260804_ingestion_performance_investigation.md`** (findings
+F1–F13) and **`docs/20260804_stats_endpoint_keyerror_fix.md`**.
+
+What landed:
+
+- **Streaming `parse_pdf` (F4)** — one implementation, in `GeminiDoclingParser`. Each
+  page batch is converted → grouped by absolute `prov[0].page_no` → assembled →
+  released before the next `convert()`. `OllamaPDFParser.parse_pdf` was deleted;
+  the subclass is now just `_call_vlm`, `get_backend_name` and its tuned defaults,
+  so a fix can no longer be applied to one backend and not the other.
+- **Instrumentation** — `_rss_mb()` (dependency-free, reads `/proc/self/status`),
+  per-batch `elapsed / rate / rss`, per-page elapsed with cumulative `vlm_wait`, and
+  a single `parse_pdf summary:` line carrying docling %, assembly %, VLM wait, call
+  and failure counts, and peak RSS. VLM counters are guarded by a lock because they
+  are written from `VLM_CONCURRENCY` pool threads. `_run_stage` times each stage;
+  the parse is wrapped in a `logfire.span`.
+- **`keep_alive: "30m"` on Ollama calls (F13)** — without it Ollama unloads the model
+  5 minutes after last use, so gaps between figure-bearing pages made each call pay a
+  cold model load. This is what the observed 27–33s per call on a 0.8B model was, and
+  cumulative `vlm_wait` had reached 3593s by page 463 of 514.
+- **VLM failures are attributable (F10)** — the failure path now logs elapsed time,
+  exception type, and the HTTP status and body. The `[IMAGE]` fallback was previously
+  silent, so a non-vision model would drop every figure with no visible error.
+- **`asyncio.to_thread` for the parse (F7)** — the synchronous hour-long `parse_pdf`
+  no longer blocks the worker's event loop and its asyncpg pool.
+- **Dead code** — removed `_parse_page_by_page` (never called) and the first
+  `_fix_markdown_headings`, which was shadowed by a second definition of the same name.
+
+Deliberately **not** applied at that point, pending measurement: raising the container
+CPU quota (F1/Fix A), raising `DOCLING_NUM_THREADS` (F2/Fix B), cross-page VLM
+pipelining and `httpx.Client` connection pooling (F5/Fix D), and `OMP_NUM_THREADS`
+for the embed stage (F9/Fix G). The tuning knobs were exposed at their previous
+hardcoded values precisely so the baseline stayed uncontaminated and each became a
+one-variable experiment — F12 is the cautionary example, where two simultaneous
+changes measured on two different documents produced a 4× improvement nobody can
+attribute. §15.8 is what those knobs were then set to, and why.
+
+### 15.8 VLM reasoning, table routing and host resources (2026-08-05)
+
+Full write-up: **`docs/20260805_vlm_thinking_and_table_routing.md`** (F14-F17),
+measured on the Mac dev host, where — unlike the WSL2 investigation — **Ollama runs
+locally** and shares the machine.
+
+The headline is that the assemble cost was never docling and never the network:
+
+- **`OLLAMA_VLM_THINK=false` (F14).** `qwen3.5:0.8b` is a reasoning model and Ollama
+  defaults thinking on. Measured 85-87s per call versus 2-6s with it off, and the
+  reasoning is discarded unread — `_call_vlm` reads only the `response` field, while
+  Ollama returns reasoning in a separate `thinking` key. The request field is the API
+  equivalent of `/set nothink`; appending `/no_think` to the prompt is a Qwen3
+  convention with no effect on qwen3.5. This supersedes F13's cold-load explanation.
+- **Blank responses are now failures (F14b).** With thinking on, every table call
+  returned an empty body after ~3600 reasoning tokens — 3 of 3. `_process_page` wrapped
+  that into an empty `<table>`, so tables vanished from the output silently. They now
+  count in `vlm_failures` and fall back to `[IMAGE]`.
+- **`VLM_TABLES=false` (F16).** A 0.8B VLM cannot do table OCR: on `bert.pdf` the
+  13-column GLUE table came back with headers `I, II, III, IV…` and a small table came
+  back with invented rows. The old rule sent a table to the VLM only when
+  `_is_complex_table()` was true (>8 rows **and** >6 cols) — i.e. the hardest tables to
+  the weakest extractor. All tables now go to docling's TableFormer, which the pipeline
+  already used for every simple table. Figures still go to the VLM, where it does well
+  (2.78s and an accurate description of the BERT architecture diagram).
+- **`VLM_CONCURRENCY=1` (F15).** Against a local Ollama serializing on one GPU:
+  3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+- **Host resources (F17).** The Docker Desktop CPU slider showed 6 but `docker info`
+  reported 4 — that slider needs *Apply & Restart*, and no thread tuning means anything
+  until it reads 6. CPU ceilings summed to 9.0 against 4 real CPUs, and `langfuse` was
+  not profile-gated despite its own comment, so it started by default and held 1G of a
+  6.77 GiB VM. Workers are now `cpus: "4.0"`, postgres and app `"1.0"`, `langfuse` is
+  gated behind `profiles: [observability]`, and `DOCLING_NUM_THREADS` is 4.
+
+Still unverified: docling's TableFormer output has not been compared side by side
+against the VLM's, and the parse-side CPU changes have no measurement on this machine
+yet. Both are listed in that document's "Still to verify".
+
 ---
 
-**Last updated**: 2026-08-04
+**Last updated**: 2026-08-05

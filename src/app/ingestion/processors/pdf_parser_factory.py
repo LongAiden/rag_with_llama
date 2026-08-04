@@ -18,11 +18,20 @@ def create_pdf_parser(backend: str, settings: "AppSettings") -> PDFParserBase:
     Raises:
         ValueError: unknown backend string or missing credentials
     """
+    tuning = dict(
+        docling_num_threads=settings.docling_num_threads,
+        page_batch_size=settings.docling_page_batch_size,
+        vlm_concurrency=settings.vlm_concurrency,
+        vlm_tables=settings.vlm_tables,
+    )
+
     if backend == "ollama":
         from app.ingestion.processors.ollama_pdf_parser import OllamaPDFParser
         return OllamaPDFParser(
             ollama_base_url=settings.ollama_base_url,
             vlm_model=settings.ollama_vlm_model,
+            think=settings.ollama_vlm_think,
+            **tuning,
         )
 
     if backend == "gemini-docling":
@@ -32,6 +41,7 @@ def create_pdf_parser(backend: str, settings: "AppSettings") -> PDFParserBase:
         return GeminiDoclingParser(
             api_key=settings.google_api_key,
             gemini_model=settings.gemini_model,
+            **tuning,
         )
 
     raise ValueError(f"Unknown pdf_parser_backend: {backend!r}. Choose 'ollama' or 'gemini-docling'.")
