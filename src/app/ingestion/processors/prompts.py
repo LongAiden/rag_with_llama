@@ -100,6 +100,7 @@ counting or listing tasks.
 - If the answer is not in the context, say "I don't have enough information to answer that."
 - Never make up information not present in the context.
 - Cite page numbers when available (e.g. "Page 3").
+- Summarize the relevant information in your own words. Do not copy sentences verbatim from the context.
 
 Context:
 {context}

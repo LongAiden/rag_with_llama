@@ -50,7 +50,7 @@ dependencies and only needs to run once. Subsequent builds are fast.
 docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
 
 # Step 2 - build and start all services (~1–2 min)
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 The app is ready when you see:
@@ -506,7 +506,7 @@ pytest tests/integration -v    # requires running postgres
 docker compose restart app celery_worker_rag celery_worker_upload celery_worker_ingestion celery_beat
 
 # Dependency changes (slower, ~1–2 min)
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 ---
@@ -528,7 +528,7 @@ docker compose logs postgres
 **Reset the database (deletes all data):**
 ```bash
 docker compose down -v
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 **Full clean rebuild:**
@@ -536,7 +536,7 @@ docker compose up --build
 docker compose down -v
 docker system prune -a
 docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 **Chunk insertion fails with `asyncpg DataError: expected str, got dict` or `expected str, got list`:**
