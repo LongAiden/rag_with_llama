@@ -46,6 +46,12 @@ Rules:
 
 # ── Ollama VLM prompts (simpler, fallback-friendly) ──────────────────────────
 
+# Bounded deliberately. Measured over a full 504-page run (79 calls, F18 settings
+# temperature 0.0 / num_predict 384): mean output 81 words (~318 tok), 28 of 79
+# descriptions cut off mid-sentence at the num_predict ceiling, and 12 of 79 ending
+# in a clause that enumerates the categories below only to say none are present.
+# Latency is pure decode at ~42 tok/s, so output length IS latency — but the ceiling
+# only truncates, it never asks for brevity. That has to come from the prompt.
 OLLAMA_IMAGE_PROMPT = """\
 Look at this image from a PDF page.
 
@@ -54,7 +60,11 @@ Describe what you see inside <figure></figure> tags.
 Rules:
 - Start your output with <figure> and end with </figure>. Nothing outside these tags.
 - On the first line inside <figure>, add: <figure_type>Chart|Diagram|Logo|Screenshot|Other</figure_type>
-- Describe all visible content: axis labels, legend entries, data values, text annotations, flow steps.
+- Use at most 3 short sentences (60 words) after the <figure_type> line. Stop there.
+- Describe the axis labels, legend entries, data values and text annotations that are
+  present. Do NOT mention that something is absent.
+- If the image contains no chart, diagram or figure — for example a rule, an equation,
+  or a band of text — transcribe the visible text verbatim and stop.
 - If the image shows a flowchart or process: describe the sequence (A → B → C).
 - Do NOT use markdown headings (#, ##, ###) anywhere in the output.
 - Do NOT write any text, title, or commentary before <figure> or after </figure>.
