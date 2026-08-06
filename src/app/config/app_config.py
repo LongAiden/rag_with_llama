@@ -115,6 +115,21 @@ class AppSettings(BaseSettings):
     # versus 2.3s, with the reasoning discarded unread. Tables additionally came
     # back empty every time thinking was on.
     ollama_vlm_think: bool = Field(default=False, validation_alias='OLLAMA_VLM_THINK')
+    # VLM latency is pure decode at ~35 tok/s on this host, so elapsed IS the
+    # output length, and Ollama's defaults leave it unbounded. Measured: the
+    # same 218×54px crop returned 22 tokens in 1.55s and 342 tokens in 10.94s on
+    # consecutive identical requests at temperature 0.8; the worst call of a
+    # 191-call run took 93.3s. Greedy decoding gives 22-35 tokens and a verbatim
+    # transcription instead of an invented one.
+    ollama_vlm_temperature: float = Field(default=0.0, validation_alias='OLLAMA_VLM_TEMPERATURE')
+    # Hard ceiling for the tail, not the primary lever — 384 leaves headroom
+    # over the ~126-token honest description of a real figure.
+    ollama_vlm_num_predict: int = Field(default=384, validation_alias='OLLAMA_VLM_NUM_PREDICT')
+    # Short-side floor for sending a picture to the VLM. 113 of 191 calls in a
+    # 504-page run were strips under 64px tall — rules and equation lines, not
+    # figures — and they consumed 60% of the VLM budget hallucinating content
+    # that then gets embedded.
+    vlm_min_image_short_px: int = Field(default=64, validation_alias='VLM_MIN_IMAGE_SHORT_PX')
     # Tables go to docling's TableFormer. A 0.8B VLM cannot read them — on
     # bert.pdf the 13-column GLUE table came back with headers "I, II, III, IV…"
     # and a small table came back with invented rows. Set true to restore the

@@ -145,6 +145,20 @@ config --services` now lists six services and langfuse is not among them.
 
 ---
 
+## F18 — the remaining cost, in its own document
+
+With F14-F17 applied the first full run still showed 12-17s per call. That is a different
+cause, not a regression of F14: latency is pure decode at ~35 tok/s, and `_call_vlm` sent
+no `options`, so Ollama's `temperature 0.8` / `num_predict -1` left output length — and
+therefore latency — unbounded. Measured over that run: 2245s of VLM wait across 191 calls,
+range 1.04-93.3s, no correlation with image size.
+
+**See `docs/20260805_vlm_output_length_and_image_gate.md`** (F18, F18b, F18c) for the
+measurements, the short-side image gate, and the token-count logging. The verification
+procedure there supersedes the one below.
+
+---
+
 ## What changed
 
 | File | Change |
@@ -164,6 +178,9 @@ New settings, all measured rather than guessed:
 | `VLM_TABLES` | `false` | F16 — VLM table output is garbage or empty; TableFormer is better |
 | `VLM_CONCURRENCY` | `1` | F15 — 2 is 27% slower, 4 is 5× slower against a local Ollama |
 | `DOCLING_NUM_THREADS` | `4` | F2 + F17 — targets the M1's 4 performance cores |
+
+F18 adds three more (`OLLAMA_VLM_TEMPERATURE`, `OLLAMA_VLM_NUM_PREDICT`,
+`VLM_MIN_IMAGE_SHORT_PX`) — documented in its own file.
 
 Tests: `tests/unit/test_ollama_vlm_call.py` (think flag, blank-response guard, `thinking`
 field never merged into the markdown) and `tests/unit/test_vlm_table_routing.py` (no VLM
@@ -188,12 +205,12 @@ verified to fail against the pre-fix code.
 
 ## Verification
 
-```bash
-docker compose up -d --build --force-recreate celery_worker_upload
-docker compose logs -f celery_worker_upload | tee assemble.log
+**Superseded by `docs/20260805_vlm_output_length_and_image_gate.md`**, which adds the
+database and Redis cleanup this procedure was missing and the token-count greps. The
+checks specific to F14-F17 still hold:
 
-grep "VLM call #"        assemble.log   # elapsed= low single digits, not 27-90s
-grep "parse_pdf summary" assemble.log   # vlm_calls drops too — tables no longer routed here
+```bash
+grep "parse_pdf summary" assemble.log   # vlm_calls drops — tables no longer routed here
 grep "Converted pages"   assemble.log   # rate=Xs/page for the parse side
 docker info --format '{{.NCPU}}'        # must read 6 before trusting any thread number
 ```
@@ -206,5 +223,9 @@ docker info --format '{{.NCPU}}'        # must read 6 before trusting any thread
 
 [llm_operations.py:37](src/app/retrieval/llm_operations.py#L37) sends the same bare payload
 to `/api/generate` for the Q&A answer with `deepseek-r1:1.5b` — also a reasoning model,
-also with no `keep_alive` and no `think`. Same class of problem on the query path; not
-touched here. The embedding stage is untouched, as it is already fast.
+also with no `keep_alive`, no `think` and, per F18, **no `options`** either. Same class of
+problem on the query path, now twice over; not touched here. The embedding stage is
+untouched, as it is already fast.
+
+Also not done: reusing an `httpx.Client` across VLM calls. Connect plus prefill is 0.26s
+of what used to be a 12s call — only worth measuring once F18 has landed.

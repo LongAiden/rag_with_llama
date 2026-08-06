@@ -149,6 +149,20 @@ services:
       # and a small table came back with invented rows. Set true to restore the
       # old behaviour of routing complex tables to the VLM.
       VLM_TABLES: ${VLM_TABLES:-false}
+      # Latency here is pure decode at ~35 tok/s, so elapsed IS the output
+      # length — and Ollama's defaults (temperature 0.8, num_predict -1)
+      # leave it unbounded. Measured: the same 218x54px crop returned 22
+      # tokens in 1.55s and 342 tokens of invented flowchart in 10.94s on
+      # consecutive identical requests, and the worst call of a 191-call
+      # run took 93.3s. Greedy decoding gives 22-35 tokens and transcribes
+      # the crop instead of inventing one.
+      OLLAMA_VLM_TEMPERATURE: ${OLLAMA_VLM_TEMPERATURE:-0.0}
+      OLLAMA_VLM_NUM_PREDICT: ${OLLAMA_VLM_NUM_PREDICT:-384}
+      # Short-side floor for sending a picture to the VLM. 113 of those 191
+      # calls were strips under 64px tall — rules and equation lines, not
+      # figures — and they consumed 60% of the VLM budget hallucinating
+      # content that then gets embedded.
+      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -247,6 +261,20 @@ services:
       # and a small table came back with invented rows. Set true to restore the
       # old behaviour of routing complex tables to the VLM.
       VLM_TABLES: ${VLM_TABLES:-false}
+      # Latency here is pure decode at ~35 tok/s, so elapsed IS the output
+      # length — and Ollama's defaults (temperature 0.8, num_predict -1)
+      # leave it unbounded. Measured: the same 218x54px crop returned 22
+      # tokens in 1.55s and 342 tokens of invented flowchart in 10.94s on
+      # consecutive identical requests, and the worst call of a 191-call
+      # run took 93.3s. Greedy decoding gives 22-35 tokens and transcribes
+      # the crop instead of inventing one.
+      OLLAMA_VLM_TEMPERATURE: ${OLLAMA_VLM_TEMPERATURE:-0.0}
+      OLLAMA_VLM_NUM_PREDICT: ${OLLAMA_VLM_NUM_PREDICT:-384}
+      # Short-side floor for sending a picture to the VLM. 113 of those 191
+      # calls were strips under 64px tall — rules and equation lines, not
+      # figures — and they consumed 60% of the VLM budget hallucinating
+      # content that then gets embedded.
+      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -334,6 +362,20 @@ services:
       # and a small table came back with invented rows. Set true to restore the
       # old behaviour of routing complex tables to the VLM.
       VLM_TABLES: ${VLM_TABLES:-false}
+      # Latency here is pure decode at ~35 tok/s, so elapsed IS the output
+      # length — and Ollama's defaults (temperature 0.8, num_predict -1)
+      # leave it unbounded. Measured: the same 218x54px crop returned 22
+      # tokens in 1.55s and 342 tokens of invented flowchart in 10.94s on
+      # consecutive identical requests, and the worst call of a 191-call
+      # run took 93.3s. Greedy decoding gives 22-35 tokens and transcribes
+      # the crop instead of inventing one.
+      OLLAMA_VLM_TEMPERATURE: ${OLLAMA_VLM_TEMPERATURE:-0.0}
+      OLLAMA_VLM_NUM_PREDICT: ${OLLAMA_VLM_NUM_PREDICT:-384}
+      # Short-side floor for sending a picture to the VLM. 113 of those 191
+      # calls were strips under 64px tall — rules and equation lines, not
+      # figures — and they consumed 60% of the VLM budget hallucinating
+      # content that then gets embedded.
+      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -416,6 +458,20 @@ services:
       # and a small table came back with invented rows. Set true to restore the
       # old behaviour of routing complex tables to the VLM.
       VLM_TABLES: ${VLM_TABLES:-false}
+      # Latency here is pure decode at ~35 tok/s, so elapsed IS the output
+      # length — and Ollama's defaults (temperature 0.8, num_predict -1)
+      # leave it unbounded. Measured: the same 218x54px crop returned 22
+      # tokens in 1.55s and 342 tokens of invented flowchart in 10.94s on
+      # consecutive identical requests, and the worst call of a 191-call
+      # run took 93.3s. Greedy decoding gives 22-35 tokens and transcribes
+      # the crop instead of inventing one.
+      OLLAMA_VLM_TEMPERATURE: ${OLLAMA_VLM_TEMPERATURE:-0.0}
+      OLLAMA_VLM_NUM_PREDICT: ${OLLAMA_VLM_NUM_PREDICT:-384}
+      # Short-side floor for sending a picture to the VLM. 113 of those 191
+      # calls were strips under 64px tall — rules and equation lines, not
+      # figures — and they consumed 60% of the VLM budget hallucinating
+      # content that then gets embedded.
+      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies

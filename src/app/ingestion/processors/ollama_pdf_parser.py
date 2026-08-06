@@ -13,6 +13,7 @@ from app.ingestion.processors.gemini_docling_parser import (
     _strip_stray_headers,
     _normalize_tables_in_markdown,
     _DEFAULT_DOCLING_NUM_THREADS,
+    _DEFAULT_MIN_IMAGE_SHORT_PX,
     _DEFAULT_VLM_TABLES,
     _DOCLING_PAGE_BATCH_SIZE,
     _VLM_CONCURRENCY,
@@ -45,6 +46,8 @@ class OllamaPDFParser(GeminiDoclingParser):
         vlm_timeout: float = 300.0,
         keep_alive: str = "30m",
         think: bool = False,
+        temperature: float = 0.0,
+        num_predict: int = 384,
         images_scale: float = 0.6,
         complex_table_rows: int = 8,
         complex_table_cols: int = 6,
@@ -57,6 +60,7 @@ class OllamaPDFParser(GeminiDoclingParser):
         page_batch_size: int = _DOCLING_PAGE_BATCH_SIZE,
         vlm_concurrency: int = _VLM_CONCURRENCY,
         vlm_tables: bool = _DEFAULT_VLM_TABLES,
+        min_image_short_px: int = _DEFAULT_MIN_IMAGE_SHORT_PX,
     ):
         super().__init__(
             api_key=None,
@@ -74,12 +78,15 @@ class OllamaPDFParser(GeminiDoclingParser):
             page_batch_size=page_batch_size,
             vlm_concurrency=vlm_concurrency,
             vlm_tables=vlm_tables,
+            min_image_short_px=min_image_short_px,
         )
         self._ollama_base_url = ollama_base_url.rstrip("/")
         self._vlm_model = vlm_model
         self._vlm_timeout = vlm_timeout
         self._keep_alive = keep_alive
         self._think = think
+        self._temperature = temperature
+        self._num_predict = num_predict
 
     def get_backend_name(self) -> str:
         return "ollama-docling"
@@ -122,11 +129,28 @@ class OllamaPDFParser(GeminiDoclingParser):
                     # appending `/no_think` to the prompt is a Qwen3 convention
                     # and has no effect here.
                     "think": self._think,
+                    # Latency here is pure decode — measured against this same
+                    # local Ollama, prefill is 206 tokens in 0.26s regardless of
+                    # crop size, then eval_duration ≈ elapsed at ~35 tok/s. So
+                    # elapsed IS the output length, and Ollama's defaults
+                    # (temperature 0.8, num_predict -1) leave it unbounded: the
+                    # same 218×54px equation strip came back as 22 tokens in
+                    # 1.55s and as 342 tokens of invented flowchart in 10.94s on
+                    # consecutive identical requests, and the worst call of a
+                    # 191-call run took 93.3s (~3200 tokens, i.e. running to the
+                    # 4096 context). Greedy decoding collapses that to 22-35
+                    # tokens and transcribes the crop instead of inventing one;
+                    # num_predict is the ceiling for the tail, not the lever.
+                    "options": {
+                        "temperature": self._temperature,
+                        "num_predict": self._num_predict,
+                    },
                 },
                 timeout=timeout,
             )
             response.raise_for_status()
-            raw = response.json()["response"]
+            payload = response.json()
+            raw = payload["response"]
             raw = _strip_code_fences(raw)
             raw = _strip_stray_headers(raw)
             raw = _normalize_tables_in_markdown(raw)
@@ -147,11 +171,27 @@ class OllamaPDFParser(GeminiDoclingParser):
                 return "[IMAGE]"
 
             call_no = self._record_vlm_call(elapsed)
+            # Token counts, not just latency: elapsed alone cannot distinguish a
+            # slow host from a model that decided to emit 3000 tokens, which is
+            # what made F14/F18 take two rounds of investigation to tell apart.
+            in_tok = payload.get("prompt_eval_count") or 0
+            out_tok = payload.get("eval_count") or 0
+            eval_ns = payload.get("eval_duration") or 0
+            tok_s = out_tok / (eval_ns / 1e9) if eval_ns else 0.0
+            done_reason = payload.get("done_reason", "?")
             logger.info(
                 f"VLM call #{call_no}: model={self._vlm_model}, "
                 f"img={pil_img.width}x{pil_img.height}px, {img_size_kb:.1f}KB, "
-                f"elapsed={elapsed:.2f}s"
+                f"elapsed={elapsed:.2f}s, in={in_tok} out={out_tok} tok, "
+                f"{tok_s:.1f} tok/s, done={done_reason}"
             )
+            # "length" means num_predict truncated the answer mid-sentence.
+            # Either the cap is too low or this crop should never have been sent.
+            if done_reason == "length":
+                logger.warning(
+                    f"VLM call #{call_no} hit num_predict={self._num_predict} "
+                    f"(img={pil_img.width}x{pil_img.height}px) — output truncated"
+                )
             return raw
         except Exception as exc:
             elapsed = time.monotonic() - started

@@ -20,6 +20,13 @@ _DEFAULT_COMPLEX_TABLE_ROWS = 8
 _DEFAULT_COMPLEX_TABLE_COLS = 6
 _DEFAULT_IMAGES_SCALE = 0.75
 _DEFAULT_MIN_IMAGE_PX = 150
+# Short-side floor. The both-dimensions rule above only ever caught square
+# icons, so every full-column 40-60px-tall strip — rules, equation lines, header
+# bands — still went to the VLM: 113 of 191 calls in a 504-page run were under
+# 64px tall and burned 1348s (60% of the VLM budget) producing invented
+# descriptions that then get embedded. At images_scale 0.6, 64px is ~1.5in on
+# the page; real figures clear it.
+_DEFAULT_MIN_IMAGE_SHORT_PX = 64
 _DOCLING_PAGE_BATCH_SIZE = 50
 # 1, not 2: Ollama runs on the same host and serializes on one GPU. Measured on
 # an M1 with think disabled — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
@@ -254,6 +261,7 @@ class GeminiDoclingParser(PDFParserBase):
         page_batch_size: int = _DOCLING_PAGE_BATCH_SIZE,
         vlm_concurrency: int = _VLM_CONCURRENCY,
         vlm_tables: bool = _DEFAULT_VLM_TABLES,
+        min_image_short_px: int = _DEFAULT_MIN_IMAGE_SHORT_PX,
     ):
         self._api_key = api_key
         self._gemini_model = gemini_model
@@ -265,6 +273,7 @@ class GeminiDoclingParser(PDFParserBase):
         self._h2_min_height = h2_min_height
         self._h3_min_height = h3_min_height
         self._min_image_px = min_image_px
+        self._min_image_short_px = min_image_short_px
         self._max_pages = max_pages
         self._docling_num_threads = docling_num_threads
         self._page_batch_size = page_batch_size
@@ -479,6 +488,12 @@ class GeminiDoclingParser(PDFParserBase):
                     continue
                 if self._min_image_px > 0 and (pil.width < self._min_image_px and pil.height < self._min_image_px):
                     print(f"  p{page_no}: {label} too small ({pil.width}×{pil.height}px < {self._min_image_px}px), skipping VLM", flush=True)
+                    continue
+                if self._min_image_short_px > 0 and min(pil.width, pil.height) < self._min_image_short_px:
+                    print(
+                        f"  p{page_no}: {label} too thin ({pil.width}×{pil.height}px, "
+                        f"short side < {self._min_image_short_px}px), skipping VLM", flush=True
+                    )
                     continue
                 print(f"  p{page_no}: {label} ({pil.width}×{pil.height}px) → VLM", flush=True)
                 

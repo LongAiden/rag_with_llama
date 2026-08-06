@@ -25,6 +25,9 @@ def mock_settings():
     settings.vlm_concurrency = 1
     settings.vlm_tables = False
     settings.ollama_vlm_think = False
+    settings.ollama_vlm_temperature = 0.0
+    settings.ollama_vlm_num_predict = 384
+    settings.vlm_min_image_short_px = 64
     return settings
 
 
@@ -60,10 +63,13 @@ class TestCreatePdfParser:
                 ollama_base_url="http://localhost:11434",
                 vlm_model="qwen3.5:0.8b",
                 think=False,
+                temperature=0.0,
+                num_predict=384,
                 docling_num_threads=2,
                 page_batch_size=50,
                 vlm_concurrency=1,
                 vlm_tables=False,
+                min_image_short_px=64,
             )
 
     def test_gemini_passes_correct_params(self, mock_settings):
@@ -77,6 +83,7 @@ class TestCreatePdfParser:
                 page_batch_size=50,
                 vlm_concurrency=1,
                 vlm_tables=False,
+                min_image_short_px=64,
             )
 
 

@@ -563,7 +563,9 @@ The query pipeline now supports two selectable modes:
 - `INGESTION_CLAIM_TIMEOUT_MINUTES`: **180** in `docker-compose.yml` (`AppSettings` default is still 30). Must exceed the worst-case parse: a 500-page PDF runs ~60 minutes, and at 30 the 6-hourly recovery sweep declared live parses stale, re-dispatched a duplicate conversion, and consumed the retry budget of a document that never failed.
 - `DOCLING_NUM_THREADS`: Default **2**. Docling's `AcceleratorOptions` thread count. Raising it does nothing unless the container's `cpus:` limit rises too, and vice versa.
 - `DOCLING_PAGE_BATCH_SIZE`: Default **50**. Pages per `convert()` call; sets peak parse memory now that batches are released as they finish.
-- `VLM_CONCURRENCY`: Default **2**. Parallel VLM calls. With Ollama on a separate host these are network waits, so higher values can pay off.
+- `VLM_CONCURRENCY`: Default **1**. Parallel VLM calls *within a single parse*. With Ollama on a separate host these are network waits, so higher values can pay off; against a local Ollama they serialize on one GPU (§15.8). Note it does not bound concurrency **across** workers — `celery_worker_upload` and `celery_worker_ingestion` are separate processes and can each be parsing a document.
+- `OLLAMA_VLM_TEMPERATURE` / `OLLAMA_VLM_NUM_PREDICT`: Default **0.0** / **384**. VLM latency is pure decode at ~35 tok/s, so elapsed *is* the output length, and Ollama's defaults leave it unbounded (§15.9).
+- `VLM_MIN_IMAGE_SHORT_PX`: Default **64**. Skips pictures whose short side is under this. The older `min_image_px=150` rule needs *both* dimensions small, so it only caught square icons and let every thin strip through.
 - `TORCHDYNAMO_DISABLE`: **1** on all four app-image services. The runtime image ships without a C++ compiler by design, so a downstream `torch.compile` path (torchvision NMS inside docling's layout pass) crashes with `InvalidCxxCompiler`. Nothing in this repo calls `torch.compile`, so forcing eager execution removes the crash at no cost. An env change needs `docker compose up -d --force-recreate <service>` — a plain `restart` will not pick it up.
 
 The three parse-tuning defaults reproduce the values that were previously hardcoded, so exposing them changed no behaviour. They exist so the CPU/thread and VLM-concurrency experiments are `.env` changes rather than code edits.
@@ -662,6 +664,35 @@ The headline is that the assemble cost was never docling and never the network:
 Still unverified: docling's TableFormer output has not been compared side by side
 against the VLM's, and the parse-side CPU changes have no measurement on this machine
 yet. Both are listed in that document's "Still to verify".
+
+### 15.9 Bounding VLM output length (2026-08-05, F18)
+
+Full write-up: **`docs/20260805_vlm_output_length_and_image_gate.md`** (F18, F18b, F18c).
+With thinking off, the first full run still showed
+12–17s per call on 218×54px crops. Measured over that run's 191 calls: 2245s total,
+mean 11.75s, range 1.04–93.3s, and **no correlation with image size**.
+
+- **Latency is decode, not prefill or I/O.** Prefill is ~206 tokens in 0.26s whatever the
+  crop — Qwen-VL pads small images to a fixed tile budget — and then `eval_duration ≈
+  elapsed` at ~35 tok/s. Elapsed *is* the number of output tokens.
+- **`OLLAMA_VLM_TEMPERATURE=0.0`, `OLLAMA_VLM_NUM_PREDICT=384`.** `_call_vlm` sent no
+  `options`, so Ollama applied `temperature 0.8` / `num_predict -1`. On a 0.8B model
+  given a near-empty crop that wanders into invented content: the same 218×54px equation
+  strip returned 22 tokens in 1.55s and 342 tokens of fabricated flowchart in 10.94s on
+  byte-identical consecutive requests. The 93.3s worst case is ~3200 tokens, i.e. the
+  4096 context. Temperature is the lever; `num_predict` only caps the tail.
+- **`VLM_MIN_IMAGE_SHORT_PX=64`.** The size gate skipped a picture only when *both*
+  dimensions were under 150px, so full-column 40–60px-tall strips — rules, equation
+  lines, header bands — all went to the VLM: 113 of the 191 calls, 60% of the VLM
+  budget, producing hallucinated descriptions that then get embedded.
+- **The `VLM call #` line now carries token counts**, derived `tok/s` and `done_reason`,
+  and warns on `done=length`. F14 and F18 are both "too many output tokens" and the log
+  carried only latency, which is why telling them apart needed an out-of-band experiment
+  twice.
+
+F18 is landed but **not unit-tested** — tests for the `options` payload, the
+`done=length` warning and the short-side gate are owed, and the ~10× improvement is
+predicted from the probe, not yet measured on a full document.
 
 ---
 
