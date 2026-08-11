@@ -1,7 +1,15 @@
 # Plan: `doc_name` Column for Chunk Tables
 
+> **Superseded (2026-08-12)** by
+> [`20260812_domains_and_doc_name.md`](./20260812_domains_and_doc_name.md), which keeps
+> this plan's `doc_name` core, adds the `domains` registry, and corrects four points:
+> the search form in §3.7.2 does not exist (the chat UI is JS), `doc_name` string
+> filtering is replaced by `document_ids`, `_SYSTEM_TABLES` needs to become
+> load-bearing, and the chunk-row backfill is opt-in rather than part of the migration.
+> Kept for the reasoning; implement the 08-12 plan.
+
 **Date**: 2026-08-11  
-**Status**: Proposed  
+**Status**: Superseded  
 **Scope**: Ingestion pipeline, query pipeline, database schema, API routes, response models
 
 ---

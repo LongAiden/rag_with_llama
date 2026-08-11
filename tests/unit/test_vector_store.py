@@ -126,10 +126,11 @@ class TestVectorStoreSearch:
             'text': 'Result text',
             'metadata': {'page': 1},
             'document_id': 'doc_1',
+            'doc_name': 'Linear Algebra',
             'similarity': 0.95
         }[key]
         mock_row.__contains__ = lambda self, key: key in {
-            'id', 'text', 'metadata', 'document_id', 'similarity'
+            'id', 'text', 'metadata', 'document_id', 'doc_name', 'similarity'
         }
         conn.fetch = AsyncMock(return_value=[mock_row])
 
@@ -146,6 +147,7 @@ class TestVectorStoreSearch:
         assert results[0]['chunk_id'] == 'chunk_1'
         assert results[0]['text'] == 'Result text'
         assert results[0]['document_id'] == 'doc_1'
+        assert results[0]['doc_name'] == 'Linear Algebra'
         assert results[0]['similarity'] == pytest.approx(0.95)
 
     @pytest.mark.asyncio

@@ -470,17 +470,19 @@ class TestRegisterAndDispatch:
     """Tests for register_and_dispatch_task (weekly scan)."""
 
     @pytest.mark.asyncio
+    @patch("app.infra.db.DomainRepository")
     @patch("app.worker.ingestion_tasks.build_ingestion_chain")
     @patch("app.worker.ingestion_tasks._get_repo")
     @patch("app.worker.ingestion_tasks._get_config")
     @patch("app.worker.ingestion_tasks.INPUT_RAW_DIR")
     async def test_register_and_dispatch_scans_files(
         self, mock_input_dir, mock_get_config, mock_get_repo, mock_build_chain,
-        mock_config, mock_repo, tmp_path
+        mock_domain_repo_cls, mock_config, mock_repo, tmp_path
     ):
         """Test the scan registers new files and dispatches chains."""
         mock_get_config.return_value = mock_config
         mock_get_repo.return_value = mock_repo
+        mock_domain_repo_cls.return_value.ensure_domain = AsyncMock(return_value={})
 
         mock_repo.reset_stale_claims = AsyncMock(return_value=1)
         mock_repo.reset_error_documents = AsyncMock(return_value=2)
@@ -509,11 +511,13 @@ class TestRegisterAndDispatch:
         mock_task_chain.apply_async.assert_called_once()
 
     @pytest.mark.asyncio
+    @patch("app.infra.db.DomainRepository")
     @patch("app.worker.ingestion_tasks._get_repo")
     @patch("app.worker.ingestion_tasks._get_config")
     @patch("app.worker.ingestion_tasks.INPUT_RAW_DIR")
     async def test_scan_skips_files_already_registered_by_path(
-        self, mock_input_dir, mock_get_config, mock_get_repo, mock_config, mock_repo, tmp_path
+        self, mock_input_dir, mock_get_config, mock_get_repo, mock_domain_repo_cls,
+        mock_config, mock_repo, tmp_path
     ):
         """Uploaded files must not be re-registered by the scan.
 
@@ -523,6 +527,7 @@ class TestRegisterAndDispatch:
         """
         mock_get_config.return_value = mock_config
         mock_get_repo.return_value = mock_repo
+        mock_domain_repo_cls.return_value.ensure_domain = AsyncMock(return_value={})
 
         mock_repo.reset_stale_claims = AsyncMock(return_value=0)
         mock_repo.reset_error_documents = AsyncMock(return_value=0)

@@ -221,6 +221,7 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
     color: #555;
 }
 .source-meta { font-weight: 600; color: #333; margin-bottom: 3px; }
+.source-doc { font-weight: 700; color: #1a1a1a; }
 .source-text {
     color: #666;
     overflow: hidden;
@@ -333,11 +334,16 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         </label>
         <label>Max Results: <input type="number" id="chat-limit" value="5" min="1" max="100" style="width:70px;"></label>
         <label>Threshold: <input type="number" id="chat-threshold" value="0.5" min="0.0" max="0.95" step="0.05" style="width:80px;"></label>
-        <label>Table:
-            <select id="chat-table" class="model-select" style="margin:0;padding:6px 10px;font-size:13px;">
+        <label>Domain:
+            <select id="chat-domain" class="model-select" style="margin:0;padding:6px 10px;font-size:13px;" onchange="loadDomainDocuments()">
                 <option value="document_chunks">document_chunks (loading...)</option>
             </select>
-            <button type="button" onclick="loadTableList()" title="Refresh table list" style="margin-left:6px;padding:6px 10px;font-size:13px;cursor:pointer;">↻</button>
+            <button type="button" onclick="loadDomainList()" title="Refresh domain list" style="margin-left:6px;padding:6px 10px;font-size:13px;cursor:pointer;">↻</button>
+        </label>
+        <label>Document:
+            <select id="chat-document" class="model-select" style="margin:0;padding:6px 10px;font-size:13px;">
+                <option value="">All documents in domain</option>
+            </select>
         </label>
         <label>Password: <input type="password" id="chat-password" placeholder="Required if configured"></label>
     </div>
@@ -373,8 +379,19 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             <input type="password" name="access_password" placeholder="Required if configured">
         </div>
         <div class="form-group">
-            <label>Table Name</label>
-            <input type="text" name="table_name" value="document_chunks">
+            <label>Document Name</label>
+            <input type="text" name="doc_name" placeholder="e.g. Linear Algebra (defaults to the file name)">
+        </div>
+        <div class="form-group">
+            <label>Domain</label>
+            <select id="upload-domain" class="model-select" onchange="toggleNewDomain(this)">
+                <option value="__new__">➕ New domain…</option>
+            </select>
+            <input type="text" id="upload-new-domain" placeholder="lowercase_with_underscores"
+                   style="display:none;margin-top:8px;">
+            <!-- The submit handler writes whichever control is active into this field,
+                 so the form posts a single `domain` value either way. -->
+            <input type="hidden" name="domain" id="upload-domain-value">
         </div>
         <div class="form-group">
             <label>Chunk Size</label>
@@ -462,7 +479,8 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
 
     // Ingestion runs asynchronously in a Celery worker, so /upload only returns
     // "queued". Poll the status DB until the document reaches a terminal stage.
-    async function pollDocumentStatus(documentId, filename) {
+    async function pollDocumentStatus(documentId, label) {
+        let filename = label;
         const POLL_MS = 3000;
         const deadline = Date.now() + 15 * 60 * 1000;  // VLM PDF parsing is slow
 
@@ -477,6 +495,10 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             } catch (err) {
                 continue;  // transient blip, keep polling
             }
+
+            // Prefer the stored name once the status row is readable — the caller's
+            // label is only a best guess before the row exists.
+            filename = status.doc_name || filename;
 
             if (status.stage === 'embedded') {
                 const n = status.chunk_count || 0;
@@ -503,6 +525,13 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         cachePasswordFromForm(this);
         hydratePasswordInputs();
 
+        const domainValue = resolveUploadDomain();
+        if (!domainValue) {
+            showNotification('Pick a domain, or type a name for the new one.', 'error');
+            return;
+        }
+        document.getElementById('upload-domain-value').value = domainValue;
+
         const formData = new FormData(this);
         const submitButton = this.querySelector('button[type="submit"]');
         const originalText = submitButton.textContent;
@@ -522,10 +551,12 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             if (response.ok && result.status === 'duplicate') {
                 showNotification(result.message, 'error');
             } else if (response.ok) {
-                showNotification(`"${result.filename}" queued for processing...`, 'success');
+                const label = result.doc_name || result.filename;
+                showNotification(`"${label}" queued for processing in "${result.domain}"...`, 'success');
                 this.reset(); // Clear the form
                 hydratePasswordInputs();
-                pollDocumentStatus(result.document_id, result.filename);
+                loadDomainList();  // a brand-new domain now exists
+                pollDocumentStatus(result.document_id, label);
             } else {
                 showNotification(`Upload failed: ${result.detail}`, 'error');
             }
@@ -598,7 +629,8 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         const search_mode = document.getElementById('chat-search-mode').value;
         const limit = parseInt(document.getElementById('chat-limit').value) || 5;
         const threshold = parseFloat(document.getElementById('chat-threshold').value) || 0.5;
-        const table_name = document.getElementById('chat-table').value || 'document_chunks';
+        const domain = document.getElementById('chat-domain').value || 'document_chunks';
+        const selectedDoc = document.getElementById('chat-document').value;
         const password = document.getElementById('chat-password').value || loadPassword();
         if (password) savePassword(password);
 
@@ -615,10 +647,15 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             const headers = { 'Content-Type': 'application/json' };
             if (password) headers['x-app-password'] = password;
 
+            const payload = { query, limit, threshold, model, domain, search_mode };
+            // Scoping to one document is exact — it filters on the id, not the name,
+            // so two uploads sharing a name stay distinguishable.
+            if (selectedDoc) payload.document_ids = [selectedDoc];
+
             const res = await fetch('/query', {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ query, limit, threshold, model, table_name, search_mode })
+                body: JSON.stringify(payload)
             });
 
             loadingBubble.remove();
@@ -640,10 +677,16 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
                     const bm25 = s.bm25_score != null ? ` &nbsp;·&nbsp; BM25: ${s.bm25_score.toFixed(3)}` : '';
                     const rrf = s.rrf_score != null ? ` &nbsp;·&nbsp; RRF: ${s.rrf_score.toFixed(3)}` : '';
                     const rerank = s.rerank_score != null ? ` &nbsp;·&nbsp; Rerank: ${s.rerank_score.toFixed(3)}` : '';
-                    const docId = s.document_id ? s.document_id.substring(0, 8) + '...' : 'N/A';
+                    // Lead with the document name; fall back to the id prefix for
+                    // chunks written before doc_name existed. Full id on hover.
+                    const docLabel = s.doc_name
+                        ? escapeHtml(s.doc_name)
+                        : (s.document_id ? escapeHtml(s.document_id.substring(0, 8)) + '…' : 'N/A');
+                    const docTitle = s.document_id ? ` title="${escapeHtml(s.document_id)}"` : '';
                     const page = s.page_number != null ? ` &nbsp;·&nbsp; Page ${s.page_number}` : '';
                     return `<div class="source-item">
-                        <div class="source-meta">Source ${i + 1} &mdash; ${sim}% similarity${bm25}${rrf}${rerank} &nbsp;|&nbsp; Doc: ${escapeHtml(docId)}${page}</div>
+                        <div class="source-meta">Source ${i + 1} &mdash; ${sim}% similarity${bm25}${rrf}${rerank}
+                            &nbsp;|&nbsp; <span class="source-doc"${docTitle}>📄 ${docLabel}</span>${page}</div>
                         <div class="source-text">${escapeHtml(s.text)}</div>
                     </div>`;
                 }).join('');
@@ -694,24 +737,77 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         if (saved) document.getElementById('chat-password').value = saved;
     })();
 
-    // Populate table dropdown from /tables
-    async function loadTableList() {
+    // ── Domains ──────────────────────────────────────────────────────────
+
+    // Fills both the chat domain picker and the upload domain picker from
+    // /domains. The upload picker keeps a trailing "new domain" entry: uploading
+    // into a domain that does not exist yet creates it, so there is no separate
+    // create step to walk the user through.
+    async function loadDomainList() {
+        let domains = [];
         try {
-            const res = await fetch('/tables');
+            const res = await fetch('/domains');
+            if (res.ok) {
+                const data = await res.json();
+                domains = data.domains || [];
+            }
+        } catch (_) { /* fall through to the defaults below */ }
+
+        const chatSel = document.getElementById('chat-domain');
+        if (domains.length > 0) {
+            const current = chatSel.value;
+            chatSel.innerHTML = domains.map(d =>
+                `<option value="${escapeHtml(d.name)}">${escapeHtml(d.display_name)} (${d.document_count})</option>`
+            ).join('');
+            if (current && [...chatSel.options].some(o => o.value === current)) chatSel.value = current;
+            loadDomainDocuments();
+        }
+
+        const uploadSel = document.getElementById('upload-domain');
+        if (uploadSel) {
+            const current = uploadSel.value;
+            uploadSel.innerHTML = domains.map(d =>
+                `<option value="${escapeHtml(d.name)}">${escapeHtml(d.display_name)}</option>`
+            ).join('') + '<option value="__new__">➕ New domain…</option>';
+            if (current && [...uploadSel.options].some(o => o.value === current)) uploadSel.value = current;
+            toggleNewDomain(uploadSel);
+        }
+    }
+
+    function toggleNewDomain(sel) {
+        const input = document.getElementById('upload-new-domain');
+        input.style.display = sel.value === '__new__' ? 'block' : 'none';
+    }
+
+    function resolveUploadDomain() {
+        const sel = document.getElementById('upload-domain');
+        if (sel.value === '__new__') {
+            return document.getElementById('upload-new-domain').value.trim();
+        }
+        return sel.value;
+    }
+
+    // Documents are listed from the ingestion status table, so one still being
+    // parsed shows up disabled with its stage rather than silently missing.
+    async function loadDomainDocuments() {
+        const sel = document.getElementById('chat-document');
+        const domain = document.getElementById('chat-domain').value;
+        sel.innerHTML = '<option value="">All documents in domain</option>';
+        if (!domain) return;
+        try {
+            const res = await fetch(`/domains/${encodeURIComponent(domain)}/documents`);
             if (!res.ok) return;
             const data = await res.json();
-            const sel = document.getElementById('chat-table');
-            const tables = data.tables || data.table_names || [];
-            if (tables.length === 0) return;
-            const current = sel.value;
-            sel.innerHTML = tables.map(t => {
-                const name = typeof t === 'string' ? t : t.table_name;
-                return `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+            const docs = data.documents || [];
+            sel.innerHTML += docs.map(d => {
+                const name = d.doc_name || d.file_name;
+                const ready = d.stage === 'embedded';
+                const suffix = ready ? ` (${d.chunk_count || 0})` : ` — (${d.stage})`;
+                return `<option value="${escapeHtml(d.document_id)}"${ready ? '' : ' disabled'}>${escapeHtml(name)}${suffix}</option>`;
             }).join('');
-            // Restore previous selection if it still exists
-            if (current && [...sel.options].some(o => o.value === current)) sel.value = current;
-        } catch (_) { /* keep default option */ }
+        } catch (_) { /* leave the "all documents" default in place */ }
     }
-    loadTableList();
+
+    loadDomainList();
 </script>
 {% endblock %}

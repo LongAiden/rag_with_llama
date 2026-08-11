@@ -7,8 +7,9 @@ import logfire
 from fastapi import APIRouter, Depends, HTTPException, Header
 
 from app.api.dependencies import get_config, get_forget_pipeline, get_pipeline_factory
+from app.api.routes.table_deletion import drop_chunk_table
 from app.api.validators import require_access_password, validate_table_name
-from app.infra.db import ConnectionPoolManager, IngestionRepository, TableRepository
+from app.infra.db import ConnectionPoolManager, TableRepository
 
 router = APIRouter()
 
@@ -70,68 +71,26 @@ async def delete_table(
         logfire.info("Starting table deletion", table_name=table_name)
 
         try:
-            pipeline_instance = await get_pipeline(table_name)
-            async with pipeline_instance.vector_store.connection() as conn:
-                repo = TableRepository(conn)
-
-                with logfire.span("table_existence_check"):
-                    table_exists = await repo.table_exists(table_name)
-                    row_count = await repo.get_table_row_estimate(table_name)
-                    logfire.info(
-                        "Table existence check completed",
-                        table_exists=table_exists,
-                        estimated_rows=row_count,
-                    )
-
-                if not table_exists:
-                    logfire.warn("Table deletion failed - table does not exist", table_name=table_name)
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Table '{table_name}' does not exist",
-                    )
-
-                # DROP removes the data too — TRUNCATE first only buys an extra
-                # exclusive lock.
-                with logfire.span("table_schema_deletion"):
-                    await repo.drop_table(table_name)
-                    logfire.info(
-                        "Table dropped successfully",
-                        table_name=table_name,
-                        rows_deleted=row_count,
-                    )
-
-            # Drop the ingestion status rows that pointed at this table. Leaving them
-            # behind strands every document at stage='embedded' against a table that
-            # no longer exists, and the (file_name, target_table_name) unique key then
-            # rejects re-uploads as duplicates.
-            with logfire.span("ingestion_status_cleanup"):
-                ingestion_repo = IngestionRepository(connection_string=config.connection_string)
-                removed = await ingestion_repo.delete_documents_for_table(table_name)
-                logfire.info(
-                    "Ingestion status rows removed",
-                    table_name=table_name,
-                    documents_removed=len(removed),
-                )
-
-            if forget_pipeline is not None:
-                forget_pipeline(table_name)
-            elif table_name == pipeline_instance.vector_store.table_name:
-                config.pipeline = None
-            logfire.info("Pipeline cache evicted", table_name=table_name)
+            result = await drop_chunk_table(
+                table_name,
+                config=config,
+                get_pipeline=get_pipeline,
+                forget_pipeline=forget_pipeline,
+            )
 
             logfire.info(
                 "Table deletion completed successfully",
                 table_name=table_name,
-                estimated_rows_deleted=row_count,
-                documents_removed=len(removed),
+                estimated_rows_deleted=result["estimated_rows_deleted"],
+                documents_removed=result["documents_removed"],
             )
 
             return {
                 "status": "success",
                 "message": f"Table '{table_name}' deleted successfully",
                 "table_name": table_name,
-                "estimated_rows_deleted": row_count,
-                "documents_removed": len(removed),
+                "estimated_rows_deleted": result["estimated_rows_deleted"],
+                "documents_removed": result["documents_removed"],
                 "timestamp": str(uuid.uuid1().time),
             }
 

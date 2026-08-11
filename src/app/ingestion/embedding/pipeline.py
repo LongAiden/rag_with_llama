@@ -272,9 +272,15 @@ class ChunkEmbeddingPipeline:
         file_size: int,
         parser_used: str,
         metadata: Optional[Dict] = None,
+        doc_name: Optional[str] = None,
     ) -> None:
         """
         Clean, embed, and store chunks in the vector DB.
+
+        `doc_name` is the human-readable document label. It is written to the
+        chunk column (so search results are attributable without a join) and
+        into chunk metadata (so the data/chunks/*/index.json dumps stay
+        self-describing).
         """
         valid_chunks = []
         invalid_chunks = 0
@@ -362,6 +368,7 @@ class ChunkEmbeddingPipeline:
                 'file_type': file_type,
                 'file_size': file_size,
                 'parser_used': parser_used,
+                'doc_name': doc_name,
             }
 
             if metadata:
@@ -373,6 +380,7 @@ class ChunkEmbeddingPipeline:
                 text=chunk.text,
                 embedding=embedding,
                 metadata=chunk_metadata,
+                doc_name=doc_name,
             ))
 
         logfire.info("Stage: inserting chunks into DB",
@@ -398,7 +406,8 @@ class ChunkEmbeddingPipeline:
                               similarity_threshold: float = 0.5,
                               document_id: str = None, metadata: Dict = None,
                               chunker_type: str = None,
-                              parse_backend: str = "") -> str:
+                              parse_backend: str = "",
+                              doc_name: Optional[str] = None) -> str:
         """
         Backward-compatible wrapper: parse, chunk, embed, and store.
 
@@ -408,12 +417,14 @@ class ChunkEmbeddingPipeline:
             similarity_threshold: Similarity threshold for chunking
             document_id: Optional document ID (if None, will generate one)
             metadata: Additional metadata for the document
+            doc_name: Human-readable document name; defaults to the filename stem
 
         Returns:
             Document ID
         """
         file_path = Path(file_path)
         filename = file_path.name
+        doc_name = doc_name or file_path.stem
 
         if document_id is None:
             document_id = str(uuid.uuid4())
@@ -442,6 +453,7 @@ class ChunkEmbeddingPipeline:
             file_size=parsed["file_size"],
             parser_used=parsed["parser_used"],
             metadata=metadata,
+            doc_name=doc_name,
         )
 
         print(f"Successfully processed {filename} -> Document ID: {document_id}")

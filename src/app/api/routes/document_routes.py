@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Form, H
 from app.api.dependencies import get_config, get_pipeline_factory
 from app.api.validators import validate_upload_params, require_access_password, validate_table_name
 from app.config.app_config import AppSettings, DEFAULT_TABLE_NAME
-from app.infra.db import IngestionRepository
+from app.infra.db import DomainRepository, IngestionRepository
 from app.models.schemas import UploadResponse
 from app.worker.ingestion_tasks import UPLOAD_QUEUE, build_ingestion_chain
 
@@ -26,24 +26,43 @@ async def upload_and_process(
     file: UploadFile = File(...),
     chunk_size: int = Form(512),
     table_name: str = Form("document_chunks"),
+    domain: str = Form(""),
+    doc_name: str = Form(""),
     parse_backend: str = Form(""),
     access_password: Optional[str] = Form(None),
     x_app_password: Optional[str] = Header(default=None),
     config=Depends(get_config),
 ):
-    """Upload a document, persist the raw file, and queue it for processing."""
+    """Upload a document, persist the raw file, and queue it for processing.
+
+    `domain` is the user-facing bucket; it is authoritative over `table_name` when
+    both are sent. Uploading into a domain that does not exist creates it, matching
+    the implicit chunk-table creation that already happened for new table names.
+    """
     require_access_password(access_password or x_app_password)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
+    domain = (domain or "").strip()
     table_name = (table_name or "").strip() or DEFAULT_TABLE_NAME
+    domain = domain or table_name
+
     validate_upload_params(chunk_size, file.content_type)
-    validate_table_name(table_name)
+    validate_table_name(domain)
+
+    domain_row = await DomainRepository(
+        connection_string=config.connection_string
+    ).ensure_domain(domain)
+    # The worker writes to target_table_name, so the domain's table wins over
+    # whatever table_name the caller sent.
+    table_name = domain_row["table_name"]
 
     safe_filename = Path(file.filename).name
     if not safe_filename or safe_filename in (".", ".."):
         raise HTTPException(status_code=400, detail="Invalid file name")
+
+    doc_name = (doc_name or "").strip() or Path(safe_filename).stem
 
     document_id = str(uuid.uuid4())
     INPUT_RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -84,6 +103,8 @@ async def upload_and_process(
                 "upload_timestamp": datetime.now(timezone.utc).isoformat(),
                 "validation_passed": True,
             },
+            doc_name=doc_name,
+            domain=domain,
         )
 
         task_chain = build_ingestion_chain(document_id, from_stage="registered", queue=UPLOAD_QUEUE)
@@ -95,12 +116,15 @@ async def upload_and_process(
             filename=safe_filename,
             task_id=async_task.id,
             table_name=table_name,
+            domain=domain,
         )
 
         return UploadResponse(
             status="queued",
             document_id=document_id,
             filename=safe_filename,
+            doc_name=doc_name,
+            domain=domain,
             message="Upload queued for processing. Poll /documents/{id}/status for progress.",
             chunks_created=None,
             task_id=async_task.id,
@@ -143,6 +167,8 @@ async def get_document_status(
         return {
             "document_id": status["id"],
             "file_name": status["file_name"],
+            "doc_name": status.get("doc_name"),
+            "domain": status.get("domain"),
             "stage": status["stage"],
             "attempts": status["attempts"],
             "chunk_count": status["chunk_count"],

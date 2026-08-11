@@ -272,12 +272,18 @@ async def _embed_document(doc_id: str) -> Dict[str, Any]:
         chunk_size = doc.get("chunk_size") or DEFAULT_CHUNK_SIZE
         file_type = doc.get("file_type") or chunked_metadata.get("file_type", "")
 
+        # Pre-006 rows have no doc_name; fall back to the filename stem so chunks
+        # are still attributable rather than carrying NULL.
+        doc_name = doc.get("doc_name") or Path(doc["file_name"]).stem
+
         metadata = dict(doc.get("metadata") or {})
         metadata.update({
             "filename": doc["file_name"],
             "content_type": doc.get("content_type"),
             "file_size": doc.get("file_size"),
             "validation_passed": True,
+            "doc_name": doc_name,
+            "domain": doc.get("domain"),
         })
 
         pipeline = _get_pipeline(config, doc["target_table_name"])
@@ -291,6 +297,7 @@ async def _embed_document(doc_id: str) -> Dict[str, Any]:
             file_size=doc.get("file_size") or 0,
             parser_used=chunked_metadata.get("parser_used") or "",
             metadata=metadata,
+            doc_name=doc_name,
         )
         await repo.transition_to_embedded(doc_id)
         return {"status": "embedded", "document_id": doc_id, "chunk_count": len(chunks)}
@@ -325,6 +332,12 @@ async def _scan_input_dir(repo) -> int:
 
     target_table = _SETTINGS.table_name
 
+    # documents.domain is an FK, so the registry row has to exist before any
+    # scanned file can claim membership in it.
+    from app.infra.db import DomainRepository
+
+    await DomainRepository(connection_string=repo.connection_string).ensure_domain(target_table)
+
     for entry in sorted(INPUT_RAW_DIR.iterdir()):
         if not entry.is_file() or entry.name.startswith("."):
             continue
@@ -346,6 +359,8 @@ async def _scan_input_dir(repo) -> int:
             chunk_size=DEFAULT_CHUNK_SIZE,
             parse_backend=_SETTINGS.default_parse_backend,
             metadata={"source": "directory_scan"},
+            doc_name=entry.stem,
+            domain=target_table,
         )
         registered += 1
 

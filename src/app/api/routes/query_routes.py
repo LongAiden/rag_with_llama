@@ -8,6 +8,7 @@ from app.api.dependencies import get_config, get_pipeline_factory
 from app.api.renderer import render
 from app.api.validators import require_access_password, validate_table_name
 from app.config.app_config import DEFAULT_TABLE_NAME
+from app.infra.db import DomainRepository
 from app.models.schemas import QueryRequest, RAGResponse
 from app.retrieval.search import perform_document_search
 
@@ -25,6 +26,48 @@ except ImportError:
 
 
 router = APIRouter()
+
+
+async def _resolve_search_target(
+    config,
+    domain: Optional[str],
+    table_name: Optional[str],
+    doc_name: Optional[str],
+    document_ids: Optional[List[str]],
+) -> tuple[str, Optional[List[str]]]:
+    """Turn (domain, table_name, doc_name) into a chunk table and a document filter.
+
+    `domain` wins over `table_name` when both are sent — the registry knows which
+    physical table a domain lives in, the caller may not. `doc_name` is resolved to
+    document ids here rather than pushed into the SQL: a name can match several
+    uploads, and ids are what the search path already filters on.
+
+    Raises HTTPException, so callers must invoke this outside the try block that
+    turns errors into 500s.
+    """
+    table = (table_name or DEFAULT_TABLE_NAME).strip() or DEFAULT_TABLE_NAME
+    domain = (domain or "").strip()
+    repo = DomainRepository(connection_string=config.connection_string)
+
+    if domain:
+        validate_table_name(domain)
+        row = await repo.get_domain(domain)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Domain '{domain}' does not exist")
+        table = row["table_name"]
+
+    validate_table_name(table)
+
+    doc_name = (doc_name or "").strip()
+    if doc_name and not document_ids:
+        document_ids = await repo.find_document_ids_by_name(doc_name, scope=table)
+        if not document_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No document named '{doc_name}' in '{table}'",
+            )
+
+    return table, document_ids
 
 
 async def _execute_traced_search(
@@ -78,8 +121,13 @@ async def query_documents(
 ):
     """Query documents using pgvector similarity search + LLM generation."""
     require_access_password(x_app_password)
-    table_name = (request.table_name or DEFAULT_TABLE_NAME).strip()
-    validate_table_name(table_name)
+    table_name, document_ids = await _resolve_search_target(
+        config,
+        domain=request.domain,
+        table_name=request.table_name,
+        doc_name=request.doc_name,
+        document_ids=request.document_ids,
+    )
     try:
         @observe(name="rag_query")
         async def _run_search(query: str):
@@ -94,7 +142,7 @@ async def query_documents(
                 threshold=request.threshold,
                 model=request.model,
                 session_id=request.session_id,
-                document_ids=request.document_ids,
+                document_ids=document_ids,
                 config=config,
                 get_pipeline=get_pipeline,
                 enable_reranking=request.enable_reranking,
@@ -114,6 +162,8 @@ async def query_documents_form(
     limit: int = Form(5),
     threshold: float = Form(0.3),
     table_name: str = Form(DEFAULT_TABLE_NAME),
+    domain: str = Form(""),
+    doc_name: str = Form(""),
     model: str = Form("gemini-2.5-flash"),
     search_mode: str = Form("vector"),
     access_password: Optional[str] = Form(None),
@@ -122,8 +172,13 @@ async def query_documents_form(
 ):
     """Query documents using form data (for HTML form submission)."""
     require_access_password(access_password)
-    table_name = (table_name or DEFAULT_TABLE_NAME).strip()
-    validate_table_name(table_name)
+    table_name, document_ids = await _resolve_search_target(
+        config,
+        domain=domain,
+        table_name=table_name,
+        doc_name=doc_name,
+        document_ids=None,
+    )
     try:
         @observe(name="rag_query")
         async def _run_search(query: str):
@@ -134,7 +189,7 @@ async def query_documents_form(
                 threshold=threshold,
                 model=model,
                 session_id=None,
-                document_ids=None,
+                document_ids=document_ids,
                 config=config,
                 get_pipeline=get_pipeline,
                 enable_reranking=True,
@@ -151,6 +206,7 @@ async def query_documents_form(
                 "bm25_score": source.bm25_score,
                 "rrf_score": source.rrf_score,
                 "rerank_score": source.rerank_score,
+                "doc_name": source.doc_name or "Unknown",
                 "document_id": source.document_id[:8] if source.document_id else "Unknown",
                 "page_number": source.page_number or 'N/A',
                 "text": source.text,

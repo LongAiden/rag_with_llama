@@ -12,3 +12,7 @@ class Chunk:
     text: str
     embedding: List[float]
     metadata: Optional[Dict] = None
+    # Human-readable name of the source document, denormalized onto every chunk row
+    # so search results can be attributed without joining `documents`. A snapshot of
+    # documents.doc_name at ingest time, not a mirror of it.
+    doc_name: Optional[str] = None

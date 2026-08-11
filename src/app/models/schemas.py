@@ -3,11 +3,46 @@ from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 
 
+class DomainInfo(BaseModel):
+    """A domain: a named bucket of documents backed 1:1 by one chunk table."""
+    name: str = Field(description="Domain slug; also the chunk table name")
+    display_name: str = Field(description="Human-readable domain name")
+    description: Optional[str] = None
+    table_name: str = Field(description="Physical pgvector chunk table")
+    document_count: int = Field(default=0, description="Documents registered in this domain")
+
+
+class DomainDocument(BaseModel):
+    """One document inside a domain, at whatever ingestion stage it has reached."""
+    document_id: str
+    doc_name: Optional[str] = Field(None, description="Human-readable document name")
+    file_name: str
+    stage: str = Field(description="Ingestion stage, e.g. 'embedded' or 'parsing'")
+    chunk_count: Optional[int] = None
+
+
+class CreateDomainRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=63)
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+
+
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
     limit: int = Field(default=5, ge=1, le=20)
     threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     document_ids: Optional[List[str]] = None
+    domain: Optional[str] = Field(
+        None,
+        description="Domain to search. Takes precedence over table_name when set.",
+    )
+    doc_name: Optional[str] = Field(
+        None,
+        description=(
+            "Optional exact-match document name filter. Ambiguous when two uploads "
+            "share a name — prefer document_ids for precise scoping."
+        ),
+    )
     enable_reranking: bool = Field(default=True, description="Enable cross-encoder reranking")
     rerank_top_k: Optional[int] = Field(None, ge=1, le=20, description="Number of results to return after reranking")
     model: str = Field(default="deepseek-r1:1.5b", description="LLM model to use for response generation")
@@ -24,6 +59,10 @@ class UploadResponse(BaseModel):
     document_id: str
     filename: str
     message: str
+    doc_name: Optional[str] = Field(
+        default=None, description="Human-readable document name stored for this upload")
+    domain: Optional[str] = Field(
+        default=None, description="Domain the document was ingested into")
     chunks_created: Optional[int] = None
     table_count: Optional[int] = Field(
         default=None,
@@ -71,6 +110,8 @@ class RAGSource(BaseModel):
     similarity: float = Field(
         ge=0, le=1, description="Similarity score to query")
     document_id: str = Field(description="Document this chunk comes from")
+    doc_name: Optional[str] = Field(
+        None, description="Human-readable name of the source document")
     page_number: Optional[int] = Field(
         None, description="Page number where this chunk appears")
     metadata: Dict[str, Any] = Field(

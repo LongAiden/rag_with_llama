@@ -7,6 +7,7 @@ Provides atomic operations on the `documents` status table and the intermediate
 
 import os
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -43,12 +44,18 @@ class IngestionRepository:
         chunk_size: int = 512,
         parse_backend: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        doc_name: Optional[str] = None,
+        domain: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register a new document. Always creates a new row.
 
         There is no filename de-duplication: re-uploading a file produces a second
         independent document with its own id. See
         migrations/005_drop_filename_dedupe.sql.
+
+        `doc_name` is the human-readable label (defaults to the filename stem) and
+        `domain` is the registry membership; `target_table_name` remains the
+        physical chunk table the worker writes to.
         """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
@@ -56,8 +63,9 @@ class IngestionRepository:
                 """
                 INSERT INTO documents (
                     id, file_name, raw_storage_path, file_size, content_type,
-                    target_table_name, chunk_size, parse_backend, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    target_table_name, chunk_size, parse_backend, metadata,
+                    doc_name, domain
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING *
                 """,
                 doc_id,
@@ -69,6 +77,8 @@ class IngestionRepository:
                 chunk_size,
                 parse_backend,
                 metadata or {},
+                doc_name or Path(file_name).stem,
+                domain,
             )
             return dict(row)
 

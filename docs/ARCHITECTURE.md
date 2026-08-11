@@ -95,6 +95,8 @@ Every input file gets exactly one row in `documents`.
 |---|---|
 | `id` | UUID string used as `document_id` for chunks |
 | `file_name` | Display filename (no longer unique, see migration 005) |
+| `doc_name` | Human-readable document name from upload; defaults to the filename stem — added in migration 006 |
+| `domain` | Domain this document belongs to; FK to `domains(name)` — added in migration 006 |
 | `raw_storage_path` | Absolute path to the file in `input/raw/` |
 | `stage` | `registered` → `parsing` → `parsed` → `chunking` → `chunked` → `embedding` → `embedded` / `error` / `failed` |
 | `attempts` | Number of failures so far |
@@ -112,6 +114,24 @@ Every input file gets exactly one row in `documents`.
 - `document_chunked` — serialized chunk objects before embedding.
 
 Both are unique on `document_id` (migration 004) so retries overwrite rather than append.
+
+### 4.2c Domains (`domains`)
+
+A domain is a named bucket of documents backed **1:1 by one pgvector chunk table**.
+`domains` makes explicit what a chunk table name has always implied.
+
+| Column | Meaning |
+|---|---|
+| `name` | Slug and API key. CHECK-constrained to a safe SQL identifier because it is also the table name |
+| `display_name` | Human-readable name shown in the UI |
+| `description` | Optional free text |
+| `table_name` | Physical chunk table. Equals `name` today; separate so a rename need not move the table |
+
+One domain = one table = many documents = many chunks. `doc_name` is **denormalized
+onto every chunk row** so the search `SELECT` returns it without joining `documents`;
+`documents.doc_name` is authoritative and a rename must update both or they drift.
+`document_id` stays the filter key — two uploads of the same book share a `doc_name`
+but not an id. See `docs/plans/20260812_domains_and_doc_name.md`.
 
 ### 4.2b On-disk artifacts (`data/`)
 
@@ -225,11 +245,19 @@ When a table is deleted (`DELETE /table/{name}`), `forget_pipeline()` evicts the
 |---|---|---|
 | `IngestionRepository` | `src/app/infra/db/ingestion_repository.py` | `documents`, `document_parsed`, `document_chunked` CRUD, claims, retries, status |
 | `TableRepository` | `src/app/infra/db/table_repository.py` | List/count chunk tables, drop tables, per-table stats |
+| `DomainRepository` | `src/app/infra/db/domain_repository.py` | `domains` registry CRUD, documents per domain, name→id resolution. `list_domains()` also registers chunk tables that have no registry row |
 | `VectorStore` | `src/app/ingestion/embedding/vector_store.py` | Per-table chunk CRUD, similarity search, BM25, delete by document |
 
 ### 6.3 Safe identifiers
 
 `src/app/infra/db/identifiers.py` validates and quotes table names. Only `[a-zA-Z_][a-zA-Z0-9_]{0,62}` is allowed. SQL identifiers are double-quoted before interpolation. All user-supplied table names must pass `validate_table_name()` before they reach `VectorStore` or `TableRepository`.
+
+`validate_table_name()` also rejects the reserved application tables (`domains`,
+`documents`, `document_parsed`, `document_chunked`, `llm_interactions`, and the graph
+tables). Before migration 006 that `_SYSTEM_TABLES` frozenset was declared but never
+read, so an upload with `table_name=documents` reached `VectorStore._initialize_database()`,
+whose `CREATE TABLE IF NOT EXISTS` silently matched the status table and then failed
+on INSERT with a column error. Domain names go through the same check.
 
 ### 6.4 Migrations
 
@@ -241,6 +269,14 @@ SQL files in `deploy/migrations/` are mounted to `/docker-entrypoint-initdb.d` a
 | `003_create_ingestion_status.sql` | `documents`, `document_parsed`, `document_chunked` |
 | `004_ingestion_fixes.sql` | Adds `file_type`, `error_stage`, unique artifact indexes |
 | `005_drop_filename_dedupe.sql` | Removes `file_name` UNIQUE constraint; uploads always create new rows |
+| `006_domains_and_doc_name.sql` | `domains` registry; `documents.doc_name`/`domain`; `doc_name` + index on every existing chunk table; backfills one domain per chunk table |
+
+`006` deliberately does **not** backfill `doc_name` onto existing chunk *rows* — that
+is an `UPDATE ... FROM documents` per table which rewrites every row. Pre-006 chunks
+return `doc_name: null` and the UI falls back to the id prefix, which is the pre-006
+behaviour. The opt-in command is in the migration's trailing comment. Chunk tables
+created before 006 also self-heal on first use: `VectorStore._initialize_database()`
+runs `ADD COLUMN IF NOT EXISTS doc_name`.
 
 ---
 
@@ -291,8 +327,15 @@ Key environment variables (see [`.env.example`](../.env.example) for the full li
 | `query_routes` | `src/app/api/routes/query_routes.py` | `GET /`, `POST /query`, `POST /query-form` |
 | `document_routes` | `src/app/api/routes/document_routes.py` | `POST /upload`, `GET /documents/{id}/status`, `DELETE /documents/{id}`, `GET /supported-types` |
 | `table_routes` | `src/app/api/routes/table_routes.py` | `GET /tables`, `GET /tables/count`, `DELETE /table/{name}` |
+| `domain_routes` | `src/app/api/routes/domain_routes.py` | `GET /domains`, `POST /domains`, `GET /domains/{name}`, `GET /domains/{name}/documents`, `DELETE /domains/{name}` |
 | `admin_routes` | `src/app/api/routes/admin_routes.py` | `GET /stats`, `GET /health` |
 | `observability_routes` | `src/app/api/routes/observability_routes.py` | `GET /observability/stats`, `GET /observability/history`, `GET /observability/metrics` |
+
+`DELETE /table/{name}` and `DELETE /domains/{name}` share
+`src/app/api/routes/table_deletion.py:drop_chunk_table()` — dropping a chunk table is
+three coupled steps (DROP, delete the `documents` rows pointing at it, evict the cached
+pipeline), and only the first is obvious. `/tables` stays for backward compatibility;
+`/domains` is additive.
 
 Previously, routes were declared twice and only the wrapper versions were mounted. The refactor put all routing into the route modules and mounted them directly. New routes should be added with the standard FastAPI router decorators.
 
@@ -354,6 +397,8 @@ Running `tests/unit` locally gives 12 failures, all pre-existing and unrelated t
 - `tests/unit/test_chunker_factory.py` (5, chonkie API drift — the local chonkie is newer than the pinned one)
 - `tests/unit/test_delete_table_security.py` (6, MagicMock/jsonable_encoder issue)
 - `tests/unit/test_llm_provider.py` (1, `test_generate_content_retries_on_error` — this file was archived with the graph feature and never ran until it was restored to `tests/unit/`)
+
+On `refactor/document-ingestion` there are 2 more (14 total): `tests/unit/test_pdf_parser_factory.py` still asserts `min_image_short_px`, which the parser refactor renamed to `min_image_short_pt` and joined with `images_scale`/`tableformer_mode`.
 
 ### 10.4 UI / template debt
 
@@ -419,6 +464,8 @@ python -m pytest tests/integration -v
 |---|---|
 | **Status DB** | The `documents` table and its artifact tables (`document_parsed`, `document_chunked`). |
 | **Chunk table** | A user-named pgvector table (default `document_chunks`) holding chunk rows. |
+| **Domain** | A named bucket of documents, backed 1:1 by one chunk table and registered in `domains`. The user-facing name for what was previously just "the table you uploaded into". |
+| **`doc_name`** | Human-readable document name. Authoritative on `documents`, denormalized onto every chunk row so search results are attributable without a join. A label, not a key — filters use `document_id`. |
 | **Pipeline** | A `ChunkEmbeddingPipeline` instance: embedding generator + vector store for a specific table. |
 | **VLM** | Vision-language model used for PDF parsing when the `ollama` backend is selected. |
 | **RRF** | Reciprocal Rank Fusion, merges vector and BM25 rankings. |
@@ -694,6 +741,46 @@ F18 is landed but **not unit-tested** — tests for the `options` payload, the
 `done=length` warning and the short-side gate are owed, and the ~10× improvement is
 predicted from the probe, not yet measured on a full document.
 
+### 15.10 Structure preservation (2026-08-12, F23)
+
+Full write-up: **`docs/20260812_structure_preservation.md`**. Plan:
+`docs/plans/20260812_parser_structure_preservation.md`.
+
+`_process_page` threw away most of docling's structural classification. `CodeItem`
+and `ListItem` both subclass `TextItem`, so the `isinstance(item, TextItem)` branch
+caught them first and emitted bare `item.text` — `item.label`, `item.marker`,
+`item.code_language` and `item.captions` were never read. The VLM's `<figure>`
+wrapper was never enforced in code. Measured on the 504-page NLTK artifact: 631
+`>>>` lines with 0 fenced blocks, 0 `<figure>` wrappers surviving out of 79 VLM
+calls, 0 `<figure_caption>` bound to parent, 3 list markers preserved out of
+thousands.
+
+What landed:
+
+- **Label dispatch** — the `TextItem` branch dispatches on `getattr(item.label,
+  "value", "")` rather than adding more `isinstance` checks. Immune to future
+  `XItem(TextItem)` subclasses.
+- **`_format_code(item)`** — fences code with `` ```lang ``, restores doctest
+  line breaks by splitting on whitespace before `>>>` / `...` prompts, strips
+  trailing bare prompts.
+- **`_format_list_item(item)`** — uses `item.marker` when present, falls back to
+  `1.` for enumerated, `-` otherwise.
+- **`_wrap_figure(md, caption)`** — strips any `<figure>` tags the VLM did or did
+  not emit, re-adds them deterministically with `<figure_caption>` inside. Applied
+  on both sync and async VLM paths.
+- **Caption binding** — pre-pass collects caption text via `caption_text(doc)`;
+  loose `TextItem`s matching that text are skipped so captions appear only inside
+  their parent block.
+- **VLM task tuple** — carries `(col, y, x, future, kind, caption)`. The fragile
+  `_item_sort_key` re-lookup that decided table-vs-figure wrapping by re-scanning
+  all items is deleted.
+- **Fence-aware post-passes** — `_fix_markdown_headings`,
+  `_normalize_tables_in_markdown`, and `_strip_stray_headers` all track an
+  `in_fence` flag. Content inside fenced code blocks passes through unchanged.
+
+27 unit tests in `tests/unit/test_f23_structure_preservation.py`. All string work —
+no expected change to parse time or peak RSS.
+
 ---
 
-**Last updated**: 2026-08-05
+**Last updated**: 2026-08-12

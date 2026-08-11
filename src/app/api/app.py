@@ -23,6 +23,7 @@ from app.api.dependencies import config
 from app.api.routes import (
     admin_routes,
     document_routes,
+    domain_routes,
     observability_routes,
     query_routes,
     table_routes,
@@ -37,6 +38,7 @@ observability_routes.set_connection_string(config.connection_string)
 app.include_router(query_routes.router)
 app.include_router(document_routes.router)
 app.include_router(table_routes.router)
+app.include_router(domain_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(observability_routes.router)
 

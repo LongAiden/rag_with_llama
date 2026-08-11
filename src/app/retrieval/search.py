@@ -120,10 +120,15 @@ async def perform_document_search(
                         results=merged_results,
                         top_k=rerank_top_k,
                     )
+                    # RerankResult carries only the fields the reranker itself needs,
+                    # so anything not restored from original_by_id here is silently
+                    # dropped from the response. doc_name joins bm25_score/rrf_score
+                    # for exactly that reason.
                     merged_results = [{
                         'chunk_id': r.chunk_id,
                         'text': r.text,
                         'document_id': r.document_id,
+                        'doc_name': original_by_id[r.chunk_id].get('doc_name'),
                         'metadata': r.metadata,
                         'similarity': r.similarity,
                         'bm25_score': original_by_id[r.chunk_id].get('bm25_score', 0.0),
@@ -186,8 +191,10 @@ async def perform_document_search(
                     )
                     if siblings:
                         combined = "\n\n".join(s['text'] for s in siblings)
+                        sib_name = siblings[0].get('doc_name') or r.get('doc_name')
+                        doc_label = f" — {sib_name}" if sib_name else ""
                         section_context_blocks.append(
-                            f"[Section context: {sp}]\n{combined}"
+                            f"[Section context{doc_label}: {sp}]\n{combined}"
                         )
             logfire.info("Sibling expansion",
                          sections_expanded=len(section_context_blocks))
@@ -208,6 +215,12 @@ async def perform_document_search(
                 chunk_text = result['text']
                 page_content = (result.get('metadata') or {}).get('page_content', '')
 
+                # Name the source in the prompt so the model can attribute in prose
+                # ("According to Linear Algebra, ...") instead of the UI being the
+                # only place provenance shows up.
+                doc_name_label = result.get('doc_name')
+                source_label = f"Source {i+1}" + (f" — {doc_name_label}" if doc_name_label else "")
+
                 doc_id = result.get('document_id', '')
                 page_key = (doc_id, page_num if page_num is not None else 'no_page')
                 if (
@@ -216,13 +229,13 @@ async def perform_document_search(
                     and page_key not in seen_page_contexts
                 ):
                     source_block = (
-                        f"[Source {i+1}{page_info}]\n"
+                        f"[{source_label}{page_info}]\n"
                         f"[Matched chunk]: {chunk_text}\n"
                         f"[Full page context]:\n{page_content}"
                     )
                     seen_page_contexts.add(page_key)
                 else:
-                    source_block = f"[Source {i+1}{page_info}]: {chunk_text}"
+                    source_block = f"[{source_label}{page_info}]: {chunk_text}"
 
                 context_parts.append(source_block)
 
@@ -267,6 +280,7 @@ async def perform_document_search(
                     text=r['text'],
                     similarity=round(r['similarity'], 3),
                     document_id=r['document_id'],
+                    doc_name=r.get('doc_name'),
                     page_number=r.get('metadata', {}).get('page_number'),
                     metadata=r.get('metadata', {}),
                     rerank_score=round(r['rerank_score'], 3) if 'rerank_score' in r else None,

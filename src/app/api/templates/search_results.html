@@ -104,7 +104,7 @@ h2 { color: #34495e; margin-bottom: 15px; }
     {% for source in sources %}
     <div class="source-item">
         <strong>Source {{ source.index }}</strong> (Similarity: {{ "%0.1f"|format(source.similarity * 100) }}%{% if source.bm25_score %}, BM25: {{ "%0.3f"|format(source.bm25_score) }}{% endif %}{% if source.rrf_score %}, RRF: {{ "%0.3f"|format(source.rrf_score) }}{% endif %}{% if source.rerank_score is not none %}, Rerank: {{ "%0.3f"|format(source.rerank_score) }}{% endif %})<br>
-        <em>Document: {{ source.document_id }}... | Page: {{ source.page_number }}</em><br><br>
+        <em>📄 {{ source.doc_name }} | Document: {{ source.document_id }}... | Page: {{ source.page_number }}</em><br><br>
         <div style="white-space: pre-wrap; word-wrap: break-word;">{{ source.text }}</div>
     </div>
     {% endfor %}

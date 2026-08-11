@@ -203,10 +203,17 @@ def _strip_html_wrappers(md: str) -> str:
 
 
 def _strip_stray_headers(md: str) -> str:
-    """Remove markdown heading lines that appear outside <figure> or <table> blocks."""
-    lines, result, inside = md.splitlines(), [], False
+    """Remove markdown heading lines that appear outside <figure>, <table>, or fenced blocks."""
+    lines, result, inside, in_fence = md.splitlines(), [], False, False
     for line in lines:
         stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            result.append(line)
+            continue
+        if in_fence:
+            result.append(line)
+            continue
         if stripped.startswith('<figure') or stripped.startswith('<table'):
             inside = True
         if stripped.startswith('</figure>') or stripped.startswith('</table>'):
@@ -240,6 +247,7 @@ def _detect_column_split(items: list, page_width: float) -> float | None:
 
 def _normalize_tables_in_markdown(md: str) -> str:
     out, buf = [], []
+    in_fence = False
 
     def flush():
         if buf:
@@ -247,7 +255,17 @@ def _normalize_tables_in_markdown(md: str) -> str:
             buf.clear()
 
     for line in md.splitlines():
-        if line.strip().startswith("|"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            flush()
+            out.append(line)
+            continue
+        if in_fence:
+            flush()
+            out.append(line)
+            continue
+        if stripped.startswith("|"):
             buf.append(line)
         else:
             flush()
@@ -267,7 +285,8 @@ def _fix_markdown_headings(md: str) -> str:
     Post-processing pass to promote plain-text lines that look like headings
     but were emitted as TextItem by Docling (not SectionHeaderItem).
 
-    Rules (applied per-line, skipping content inside <table>…</table>):
+    Rules (applied per-line, skipping content inside <table>…</table> and
+    fenced code blocks):
       1. Numbered sections: "1. Title", "1.1 Title", "2.3.4 Title" → ## or ###
       2. ALL-CAPS short line → ##
     Lines already starting with '#' are left unchanged.
@@ -275,9 +294,19 @@ def _fix_markdown_headings(md: str) -> str:
     lines = md.splitlines()
     result = []
     in_table = False
+    in_fence = False
 
     for line in lines:
         stripped = line.strip()
+
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            result.append(line)
+            continue
+
+        if in_fence:
+            result.append(line)
+            continue
 
         # Track table regions to avoid corrupting table content
         if '<table>' in stripped.lower():
@@ -308,6 +337,63 @@ def _fix_markdown_headings(md: str) -> str:
         result.append(line)
 
     return "\n".join(result)
+
+
+_DOCTEST_SPLIT_RE = re.compile(r"\s+(?=(?:>>>|\.\.\.)\s)")
+
+
+def _format_code(item) -> str:
+    """Fence a code item and restore doctest line breaks.
+
+    Docling joins code cells with spaces by the time we see them, so fencing
+    alone leaves one long line. For interactive sessions the `>>>` / `...`
+    prompts are the line boundaries and can be restored exactly — the split
+    consumes only the whitespace before the prompt, preserving indentation.
+    Non-REPL code stays fenced but unbroken; bbox-cell reconstruction is out
+    of scope.
+    """
+    text = (item.text or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+>>>\s*$", "", text)
+    text = re.sub(r"\s+\.\.\.\s*$", "", text)
+    if ">>>" in text or "..." in text:
+        lines = _DOCTEST_SPLIT_RE.split(text)
+        text = "\n".join(lines)
+    lang = getattr(item, "code_language", None)
+    lang_str = ""
+    if lang is not None:
+        lang_val = getattr(lang, "value", str(lang)).lower()
+        if lang_val and lang_val != "unknown":
+            lang_str = lang_val
+    return f"```{lang_str}\n{text}\n```"
+
+
+def _format_list_item(item) -> str:
+    """Emit a list item with its parsed marker."""
+    text = (item.text or "").strip()
+    if not text:
+        return ""
+    marker = getattr(item, "marker", None)
+    if marker:
+        return f"{marker} {text}"
+    enumerated = getattr(item, "enumerated", False)
+    prefix = "1." if enumerated else "-"
+    return f"{prefix} {text}"
+
+
+def _wrap_figure(md: str, caption: str = "") -> str:
+    """Wrap VLM output in a deterministic <figure> block.
+
+    Strips whatever <figure> tags the model did or did not emit, then re-adds
+    them with the caption as a <figure_caption> line inside the block. The
+    0.8B model does not reliably emit the wrapper, so it is enforced here.
+    """
+    md = re.sub(r"</?figure[^>]*>", "", md, flags=re.IGNORECASE).strip()
+    inner = md
+    if caption:
+        inner = f"{md}\n<figure_caption>{caption}</figure_caption>"
+    return f"<figure>\n{inner}\n</figure>"
 
 
 # ── Main parser ───────────────────────────────────────────────────────────────
@@ -575,6 +661,7 @@ class GeminiDoclingParser(PDFParserBase):
 
         adjacent_texts: dict = {}
         skip_ids: set = set()
+        caption_texts: set = set()
         for item in items:
             if not isinstance(item, PictureItem) or not item.prov:
                 continue
@@ -582,6 +669,15 @@ class GeminiDoclingParser(PDFParserBase):
             if band:
                 adjacent_texts[id(item)] = band
                 skip_ids.update(id(t) for t in band)
+        for item in items:
+            try:
+                cap = getattr(item, "caption_text", None)
+                if callable(cap):
+                    cap_text = cap(doc)
+                    if cap_text:
+                        caption_texts.add(cap_text.strip())
+            except Exception:
+                pass
 
         ordered: list = []
         vlm_tasks: list[tuple[int, int, int, any]] = []
@@ -594,8 +690,17 @@ class GeminiDoclingParser(PDFParserBase):
 
             if id(item) in skip_ids:
                 continue
+            if isinstance(item, TextItem):
+                item_text = (item.text or "").strip()
+                if item_text and item_text in caption_texts:
+                    continue
 
             if isinstance(item, PictureItem):
+                caption = ""
+                try:
+                    caption = item.caption_text(doc) or ""
+                except Exception:
+                    pass
                 adj = adjacent_texts.get(id(item))
                 if adj:
                     bboxes = [item.prov[0].bbox] + [t.prov[0].bbox for t in adj]
@@ -622,9 +727,10 @@ class GeminiDoclingParser(PDFParserBase):
                 
                 if executor:
                     future = executor.submit(self._call_vlm, pil, _VLM_IMAGE_PROMPT)
-                    vlm_tasks.append((col, y, x, future))
+                    vlm_tasks.append((col, y, x, future, "figure", caption))
                 else:
                     md = self._call_vlm(pil, _VLM_IMAGE_PROMPT).strip()
+                    md = _wrap_figure(md, caption)
                     ordered.append((col, y, x, md))
 
             # Tables go to docling's TableFormer unless the VLM is explicitly
@@ -634,6 +740,11 @@ class GeminiDoclingParser(PDFParserBase):
             # with >8 rows AND >6 cols here — i.e. the hardest ones to the
             # weakest extractor.
             elif isinstance(item, TableItem) and self._vlm_tables and self._is_complex_table(item):
+                caption = ""
+                try:
+                    caption = item.caption_text(doc) or ""
+                except Exception:
+                    pass
                 pil = item.get_image(doc)
                 if pil is None:
                     logger.warning(f"  p{page_no}: complex table has no image, falling back to Docling")
@@ -641,6 +752,8 @@ class GeminiDoclingParser(PDFParserBase):
                         md = item.export_to_markdown(doc)
                     except Exception:
                         md = str(item.data)
+                    if caption:
+                        md = f"{md}\n<figure_caption>{caption}</figure_caption>"
                     md = f"<table>\n\n{md}\n\n</table>"
                     ordered.append((col, y, x, md))
                 else:
@@ -652,15 +765,22 @@ class GeminiDoclingParser(PDFParserBase):
                     
                     if executor:
                         future = executor.submit(self._call_vlm, pil, _VLM_TABLE_PROMPT)
-                        vlm_tasks.append((col, y, x, future))
+                        vlm_tasks.append((col, y, x, future, "table", caption))
                     else:
                         md = self._call_vlm(pil, _VLM_TABLE_PROMPT).strip()
                         if not md.startswith("<table>"):
                             md = f"<table>\n\n{md}\n\n</table>"
+                        if caption:
+                            md = md.replace("</table>", f"<figure_caption>{caption}</figure_caption>\n</table>")
                         ordered.append((col, y, x, md))
 
             elif isinstance(item, TableItem):
                 logger.debug(f"  p{page_no}: simple table ({item.data.num_rows}×{item.data.num_cols}) → Docling")
+                caption = ""
+                try:
+                    caption = item.caption_text(doc) or ""
+                except Exception:
+                    pass
                 try:
                     md = item.export_to_markdown(doc)
                 except Exception:
@@ -668,6 +788,8 @@ class GeminiDoclingParser(PDFParserBase):
                         md = item.export_to_dataframe().to_markdown(index=False)
                     except Exception:
                         md = str(item.data)
+                if caption:
+                    md = f"{md}\n<figure_caption>{caption}</figure_caption>"
                 md = f"<table>\n\n{md}\n\n</table>"
                 ordered.append((col, y, x, md))
 
@@ -689,7 +811,13 @@ class GeminiDoclingParser(PDFParserBase):
                 ordered.append((col, y, x, md))
 
             elif isinstance(item, TextItem):
-                md = (item.text or "").strip()
+                label = getattr(item.label, "value", "")
+                if label == "code":
+                    md = _format_code(item)
+                elif label == "list_item":
+                    md = _format_list_item(item)
+                else:
+                    md = (item.text or "").strip()
                 if not md:
                     continue
                 ordered.append((col, y, x, md))
@@ -698,11 +826,16 @@ class GeminiDoclingParser(PDFParserBase):
                 continue
 
         if vlm_tasks:
-            for col, y, x, future in vlm_tasks:
+            for col, y, x, future, kind, caption in vlm_tasks:
                 try:
                     md = future.result().strip()
-                    if not md.startswith("<table>") and any(isinstance(item, TableItem) for item in items if item.prov and self._item_sort_key(item) == (y, x)):
-                        md = f"<table>\n\n{md}\n\n</table>"
+                    if kind == "table":
+                        if not md.startswith("<table>"):
+                            md = f"<table>\n\n{md}\n\n</table>"
+                        if caption:
+                            md = md.replace("</table>", f"<figure_caption>{caption}</figure_caption>\n</table>")
+                    else:
+                        md = _wrap_figure(md, caption)
                     ordered.append((col, y, x, md))
                 except Exception as exc:
                     logger.error(f"VLM call failed: {exc}")

@@ -78,6 +78,7 @@ class VectorStore:
                 validate_table_name(self.table_name)
                 embedding_idx = f'"{self.table_name}_embedding_idx"'
                 document_id_idx = f'"{self.table_name}_document_id_idx"'
+                doc_name_idx = f'"{self.table_name}_doc_name_idx"'
 
                 async with self.connection() as conn:
                     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -92,9 +93,17 @@ class VectorStore:
                         text TEXT NOT NULL,
                         embedding vector(384),  -- Adjust dimension as needed
                         metadata JSONB,
+                        doc_name TEXT,
                         entity_ids UUID[] DEFAULT ARRAY[]::UUID[],
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
+                    """)
+
+                    # Tables created before migration 006 self-heal here rather than
+                    # waiting for a manual migration run against every chunk table.
+                    await conn.execute(f"""
+                    ALTER TABLE {self.safe_table_name}
+                    ADD COLUMN IF NOT EXISTS doc_name TEXT;
                     """)
 
                     # Create index for similarity search
@@ -107,6 +116,12 @@ class VectorStore:
                     await conn.execute(f"""
                     CREATE INDEX IF NOT EXISTS {document_id_idx}
                     ON {self.safe_table_name} (document_id);
+                    """)
+
+                    # Create index on doc_name for name-based listing/filtering
+                    await conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {doc_name_idx}
+                    ON {self.safe_table_name} (doc_name);
                     """)
 
                     self._initialized = True
@@ -143,18 +158,20 @@ class VectorStore:
                     chunk.document_id,
                     chunk.text,
                     embedding_str,
-                    chunk.metadata if chunk.metadata else {}
+                    chunk.metadata if chunk.metadata else {},
+                    chunk.doc_name,
                 ))
 
             # Use asyncpg's executemany for efficient batch insert
             insert_sql = f"""
-            INSERT INTO {self.safe_table_name} (id, document_id, text, embedding, metadata)
-            VALUES ($1, $2, $3, $4::vector, $5::jsonb)
+            INSERT INTO {self.safe_table_name} (id, document_id, text, embedding, metadata, doc_name)
+            VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6)
             ON CONFLICT (id) DO UPDATE SET
                 document_id = EXCLUDED.document_id,
                 text        = EXCLUDED.text,
                 embedding   = EXCLUDED.embedding,
-                metadata    = EXCLUDED.metadata;
+                metadata    = EXCLUDED.metadata,
+                doc_name    = EXCLUDED.doc_name;
             """
 
             # Process in batches
@@ -204,6 +221,7 @@ class VectorStore:
                     text,
                     metadata,
                     document_id,
+                    doc_name,
                     (1 - (embedding <=> $1::vector)) as similarity
                 FROM {self.safe_table_name}
                 WHERE (1 - (embedding <=> $1::vector)) >= $2
@@ -238,6 +256,7 @@ class VectorStore:
                     'text': row['text'],
                     'metadata': row['metadata'],
                     'document_id': row['document_id'],
+                    'doc_name': row['doc_name'],
                     'similarity': float(row['similarity'])
                 }
                 for row in rows
@@ -272,7 +291,7 @@ class VectorStore:
                 await self._initialize_database()
 
             base_query = f"""
-                SELECT id, text, metadata, document_id
+                SELECT id, text, metadata, document_id, doc_name
                 FROM {self.safe_table_name}
             """
             params: list = []
@@ -307,6 +326,7 @@ class VectorStore:
                     'text': row['text'],
                     'metadata': row['metadata'],
                     'document_id': row['document_id'],
+                    'doc_name': row['doc_name'],
                     'bm25_score': float(bm25_scores[idx]),
                 })
 
@@ -329,7 +349,7 @@ class VectorStore:
             if not self._initialized:
                 await self._initialize_database()
             query = f"""
-                SELECT id, text, metadata, document_id
+                SELECT id, text, metadata, document_id, doc_name
                 FROM {self.safe_table_name}
                 WHERE metadata->>'section_path' = $1
                   AND document_id = ANY($2)
@@ -344,6 +364,7 @@ class VectorStore:
                     'text': row['text'],
                     'metadata': row['metadata'],
                     'document_id': row['document_id'],
+                    'doc_name': row['doc_name'],
                 }
                 for row in rows
             ]
