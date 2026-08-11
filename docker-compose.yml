@@ -208,7 +208,16 @@ services:
       resources:
         limits:
           cpus: "4.0"
-          memory: 2.5G
+          # 3.5G, not 2.5G. A 504-page parse was OOM-killed (signal 9,
+          # OOMKilled=true) on its final batch at the old ceiling: RSS climbed
+          # 1589MB -> 1850MB across nine batches and the run before it peaked at
+          # 1979MB, i.e. 79% of 2.5G. Applying the Docker Desktop CPU slider
+          # (docker info NCPU 4 -> 6) roughly doubled docling throughput to
+          # ~1.5s/page and the extra in-flight work consumed what headroom was
+          # left. Only this worker is raised — celery_worker_ingestion stays at
+          # 2.5G, because the limits already sum to more than the 7.27G VM and
+          # two simultaneous parses are the case that would exhaust it.
+          memory: 3.5G
         reservations:
           cpus: "0.5"
           memory: 512M
@@ -281,9 +290,26 @@ services:
       # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
       # eager execution costs nothing and removes the crash.
       TORCHDYNAMO_DISABLE: "1"
+
+      # huggingface_hub >=0.32 routes supported repos through the Xet backend
+      # (cas-server.xethub.hf.co). Measured here: the .incomplete file stays at
+      # exactly 0 bytes while the transfer stalls, because Xet buffers chunks in
+      # its own store and only materialises the file at the end — so nothing
+      # resumes and a failed download restarts from scratch. Two parses hung
+      # 12+ minutes in docling's pipeline init before reaching page 1. Classic
+      # HTTP range requests write into .incomplete incrementally and do resume.
+      HF_HUB_DISABLE_XET: "1"
+      # Defaults are 10s each, and the HEAD revalidation against huggingface.co
+      # timed out repeatedly: "Read timed out. (read timeout=10)" on
+      # docling-layout-heron/model.safetensors.
+      HF_HUB_ETAG_TIMEOUT: "30"
+      HF_HUB_DOWNLOAD_TIMEOUT: "60"
     volumes:
       - .:/app
       - ./logs:/app/logs
+      # docling's model weights. Without this they live in the container's
+      # writable layer and every recreate re-downloads ~385MB before page 1.
+      - hf_cache:/home/appuser/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -382,9 +408,18 @@ services:
       # with InvalidCxxCompiler. Nothing here calls torch.compile, so forcing
       # eager execution costs nothing and removes the crash.
       TORCHDYNAMO_DISABLE: "1"
+
+      # See celery_worker_upload above: Xet downloads do not resume, and the
+      # 10s default etag timeout was not enough for huggingface.co on this link.
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_ETAG_TIMEOUT: "30"
+      HF_HUB_DOWNLOAD_TIMEOUT: "60"
     volumes:
       - .:/app
       - ./logs:/app/logs
+      # Shared with celery_worker_upload — both run docling and both would
+      # otherwise download the same ~385MB of weights into their own layer.
+      - hf_cache:/home/appuser/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -622,4 +657,12 @@ volumes:
   postgres_data:
     driver: local
   pgadmin_data:
+    driver: local
+  # docling's layout model (heron, 171MB) and TableFormer (212MB), shared by the
+  # two workers. These are downloaded on first parse, not baked into the image
+  # the way the MiniLM embedding model is (deploy/deployment/Dockerfile:81-84).
+  # Without a volume they sit in the container's writable layer, so any recreate
+  # — including the --force-recreate that the F18 verification procedure calls
+  # for — discards them and the next parse re-downloads ~385MB before page 1.
+  hf_cache:
     driver: local
