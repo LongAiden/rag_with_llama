@@ -10,10 +10,13 @@ from PIL import Image as PILImage
 from app.ingestion.processors.gemini_docling_parser import (
     GeminiDoclingParser,
     _strip_code_fences,
+    _strip_html_wrappers,
     _strip_stray_headers,
     _normalize_tables_in_markdown,
     _DEFAULT_DOCLING_NUM_THREADS,
-    _DEFAULT_MIN_IMAGE_SHORT_PX,
+    _DEFAULT_IMAGES_SCALE,
+    _DEFAULT_MIN_IMAGE_SHORT_PT,
+    _DEFAULT_TABLEFORMER_MODE,
     _DEFAULT_VLM_TABLES,
     _DOCLING_PAGE_BATCH_SIZE,
     _VLM_CONCURRENCY,
@@ -48,7 +51,7 @@ class OllamaPDFParser(GeminiDoclingParser):
         think: bool = False,
         temperature: float = 0.0,
         num_predict: int = 384,
-        images_scale: float = 0.6,
+        images_scale: float = _DEFAULT_IMAGES_SCALE,
         complex_table_rows: int = 8,
         complex_table_cols: int = 6,
         max_pages: Optional[int] = None,
@@ -60,7 +63,8 @@ class OllamaPDFParser(GeminiDoclingParser):
         page_batch_size: int = _DOCLING_PAGE_BATCH_SIZE,
         vlm_concurrency: int = _VLM_CONCURRENCY,
         vlm_tables: bool = _DEFAULT_VLM_TABLES,
-        min_image_short_px: int = _DEFAULT_MIN_IMAGE_SHORT_PX,
+        min_image_short_pt: float = _DEFAULT_MIN_IMAGE_SHORT_PT,
+        tableformer_mode: str = _DEFAULT_TABLEFORMER_MODE,
     ):
         super().__init__(
             api_key=None,
@@ -78,7 +82,8 @@ class OllamaPDFParser(GeminiDoclingParser):
             page_batch_size=page_batch_size,
             vlm_concurrency=vlm_concurrency,
             vlm_tables=vlm_tables,
-            min_image_short_px=min_image_short_px,
+            min_image_short_pt=min_image_short_pt,
+            tableformer_mode=tableformer_mode,
         )
         self._ollama_base_url = ollama_base_url.rstrip("/")
         self._vlm_model = vlm_model
@@ -152,6 +157,7 @@ class OllamaPDFParser(GeminiDoclingParser):
             payload = response.json()
             raw = payload["response"]
             raw = _strip_code_fences(raw)
+            raw = _strip_html_wrappers(raw)
             raw = _strip_stray_headers(raw)
             raw = _normalize_tables_in_markdown(raw)
 

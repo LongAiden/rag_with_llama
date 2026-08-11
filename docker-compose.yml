@@ -137,6 +137,7 @@ services:
       # else in the container rather than just failing to help.
       DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
       DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
       # 1, not 2: Ollama runs on the same host and serializes on one GPU.
       # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
       VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
@@ -162,7 +163,8 @@ services:
       # calls were strips under 64px tall — rules and equation lines, not
       # figures — and they consumed 60% of the VLM budget hallucinating
       # content that then gets embedded.
-      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
+      VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
+      VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -258,6 +260,7 @@ services:
       # else in the container rather than just failing to help.
       DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
       DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
       # 1, not 2: Ollama runs on the same host and serializes on one GPU.
       # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
       VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
@@ -283,7 +286,8 @@ services:
       # calls were strips under 64px tall — rules and equation lines, not
       # figures — and they consumed 60% of the VLM budget hallucinating
       # content that then gets embedded.
-      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
+      VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
+      VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -376,6 +380,7 @@ services:
       # else in the container rather than just failing to help.
       DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
       DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
       # 1, not 2: Ollama runs on the same host and serializes on one GPU.
       # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
       VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
@@ -401,7 +406,8 @@ services:
       # calls were strips under 64px tall — rules and equation lines, not
       # figures — and they consumed 60% of the VLM budget hallucinating
       # content that then gets embedded.
-      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
+      VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
+      VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -481,6 +487,7 @@ services:
       # else in the container rather than just failing to help.
       DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
       DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+      DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
       # 1, not 2: Ollama runs on the same host and serializes on one GPU.
       # Measured on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
       VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
@@ -506,7 +513,8 @@ services:
       # calls were strips under 64px tall — rules and equation lines, not
       # figures — and they consumed 60% of the VLM budget hallucinating
       # content that then gets embedded.
-      VLM_MIN_IMAGE_SHORT_PX: ${VLM_MIN_IMAGE_SHORT_PX:-64}
+      VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
+      VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
 
       # The runtime image ships without a compiler by design, so a downstream
       # torch.compile path (torchvision NMS during docling's layout pass) dies
@@ -533,8 +541,6 @@ services:
   langfuse:
     image: langfuse/langfuse:2.80
     container_name: rag_langfuse
-    profiles:
-      - observability  # Only start with: docker compose --profile observability up
     deploy:
       resources:
         limits:

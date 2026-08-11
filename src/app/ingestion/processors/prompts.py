@@ -46,11 +46,36 @@ Rules:
 
 # ── Ollama VLM prompts (simpler, fallback-friendly) ──────────────────────────
 
-# Bounded deliberately. Measured over a full 504-page run (79 calls, F18 settings
-# temperature 0.0 / num_predict 384): mean output 81 words (~318 tok), 28 of 79
-# descriptions cut off mid-sentence at the num_predict ceiling, and 12 of 79 ending
-# in a clause that enumerates the categories below only to say none are present.
-# Latency is pure decode at ~42 tok/s, so output length IS latency — but the ceiling
+# Bounded deliberately, second iteration. v1 halved output — mean 318 tok -> 160 tok,
+# and 28 of 79 num_predict truncations -> 0. Its "Do NOT mention that something is
+# absent" rule moved absence-reporting from 19 of 79 to 15 of 79 over the same
+# 504-page run: real, but far short of the goal, and the rule kept the very thing
+# that provokes it — an enumeration of "axis labels, legend entries, data values and
+# text annotations" that the model echoes back item by item to say each is missing.
+# (Measured with scripts/f21_census.py. An earlier count of 11 -> 12 came from a
+# census that stopped at the first blank line and so only ever read paragraph 1.)
+# "At most 3 short sentences (60 words)" produced a 95-word median, because a 0.8B
+# model does not count words. v2 therefore deleted the checklist rather than negating
+# it, and asked for a sentence count rather than a word count.
+#
+# v3 keeps v2's length win (mean 148 -> 105 tok over an 80-page probe) and fixes four
+# things v2 broke or left broken, each measured on that probe:
+#   * v2 said "The first names what the image is. The second states its single most
+#     important content." The model recited that sentence back as output. Any rule
+#     that describes the shape of the answer is recitable — so v3 states the bound
+#     without narrating what each sentence should carry.
+#   * descriptions landed on the </figure_type> line itself in 11 of 17 cases (F19: 2
+#     of 79), so v3 demands the newline explicitly.
+#   * 7 stray <p> tags appeared in 17 descriptions (F19: 2 in 79); nothing in v1 or v2
+#     forbade HTML, only markdown headings and code fences.
+#   * the page-1 cover became one fluent sentence of recalled knowledge about the book
+#     — naming spaCy, which is not on the cover — with the whales and the banner
+#     unmentioned. That is a grounding failure, not a length failure, so loosening the
+#     sentence bound would not have fixed it. v3 forbids outside knowledge and adds
+#     "Unclear image." as a licensed answer, so fabricating (an NLTK download dialog
+#     became a spreadsheet of invented COPPER/CHROMOS/PHENOL columns) is no longer the
+#     model's only way to fill the space.
+# Latency is pure decode at ~42 tok/s, so output length IS latency — but num_predict
 # only truncates, it never asks for brevity. That has to come from the prompt.
 OLLAMA_IMAGE_PROMPT = """\
 Look at this image from a PDF page.
@@ -60,15 +85,18 @@ Describe what you see inside <figure></figure> tags.
 Rules:
 - Start your output with <figure> and end with </figure>. Nothing outside these tags.
 - On the first line inside <figure>, add: <figure_type>Chart|Diagram|Logo|Screenshot|Other</figure_type>
-- Use at most 3 short sentences (60 words) after the <figure_type> line. Stop there.
-- Describe the axis labels, legend entries, data values and text annotations that are
-  present. Do NOT mention that something is absent.
-- If the image contains no chart, diagram or figure — for example a rule, an equation,
-  or a band of text — transcribe the visible text verbatim and stop.
+- Put the description on the NEXT line. Never on the <figure_type> line.
+- Write at most two sentences, then stop.
+- Describe only what is visible in this image. Do not use anything you know about the
+  subject, the title, or the book from any other source.
+- If you cannot read the image clearly, write exactly: Unclear image.
+- If the image is a band of text, an equation, a rule, or a code listing — anything that
+  is not a chart, diagram, logo or screenshot — output the visible text verbatim and
+  nothing else: no sentences, no description of it.
 - If the image shows a flowchart or process: describe the sequence (A → B → C).
-- Do NOT use markdown headings (#, ##, ###) anywhere in the output.
+- Output plain text. Do NOT use HTML tags (<p>, <div>, <span>), markdown headings
+  (#, ##, ###), numbered lists, or code fences.
 - Do NOT write any text, title, or commentary before <figure> or after </figure>.
-- Do NOT use code fences.
 Output only the <figure>...</figure> block.
 """
 

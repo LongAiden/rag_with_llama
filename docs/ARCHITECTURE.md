@@ -487,11 +487,11 @@ Both PDF parsers (`GeminiDoclingParser` and `OllamaPDFParser`) now use **page-ba
 - **Batch size**: 50 pages per `convert()` call (configurable via `DOCLING_PAGE_BATCH_SIZE`)
 - **Memory reduction**: Peak memory usage drops from ~1.9 GB (504-page document) to ~1.15 GB, flat regardless of document size *(only true since the streaming rewrite — see the note above)*
 - **Thread reduction**: `num_threads` reduced from 4 to 2 to match container CPU limits
-- **Image scale**: Reduced from 1.0 to 0.75 (Gemini) and 0.75 to 0.6 (Ollama) to cut page-image memory by 44%
+- **Image scale**: Reduced from 1.0 to 0.75 (Gemini) and 0.75 to 0.6 (Ollama) to cut page-image memory by 44%. **Reverted and raised to 2.0 by F22** (`VLM_IMAGES_SCALE`): 0.6 renders at 43 DPI, at which the VLM cannot read a figure and confabulates instead — see `docs/20260811_tableformer_outlier_and_prompt_v2.md`. The memory saving was real but it was being paid for in fabricated descriptions entering the chunk index.
 - **Minimum image size**: `min_image_px` increased from 0 to 150 to skip decorative icons and reduce VLM calls
 
 **Key changes in `src/app/ingestion/processors/gemini_docling_parser.py`:**
-- `_build_converter()`: `num_threads=2`, `images_scale=0.75`
+- `_build_converter()`: `num_threads=2`, `images_scale` from `VLM_IMAGES_SCALE` (default 2.0)
 - `parse_pdf()`: Converts in 50-page batches instead of whole document
 - `_is_complex_table()`: Changed from OR to AND logic (both row AND column thresholds must be exceeded) to prevent narrow tall tables (e.g., Table of Contents) from triggering VLM calls
 - `_process_page()`: Now accepts optional `ThreadPoolExecutor` for concurrent VLM dispatch

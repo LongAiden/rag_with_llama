@@ -23,7 +23,9 @@ def create_pdf_parser(backend: str, settings: "AppSettings") -> PDFParserBase:
         page_batch_size=settings.docling_page_batch_size,
         vlm_concurrency=settings.vlm_concurrency,
         vlm_tables=settings.vlm_tables,
-        min_image_short_px=settings.vlm_min_image_short_px,
+        images_scale=settings.vlm_images_scale,
+        min_image_short_pt=settings.vlm_min_image_short_pt,
+        tableformer_mode=settings.docling_tableformer_mode,
     )
 
     if backend == "ollama":

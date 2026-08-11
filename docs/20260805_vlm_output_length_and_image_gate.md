@@ -103,6 +103,12 @@ chunk table and retrieved as if it were page content.
 both-dimensions rule is untouched and still applies first. Nothing worth keeping is lost:
 the alternative for these crops is invented text entering the index.
 
+> **Superseded by F22.** The setting is now `VLM_MIN_IMAGE_SHORT_PT`, default **107pt**,
+> expressed in points rather than rendered pixels. The threshold above was pixels *at a
+> particular `images_scale`*, so it silently changed physical meaning whenever the render
+> resolution moved — and F22 moves it to 2.0. 107 × 0.6 = 64.2px, so the gate's behaviour
+> at the old scale is unchanged; it simply no longer drifts.
+
 ### F18c — the log could not answer the question it existed to answer
 
 F14 and F18 are the same sentence — "the model emitted far too many tokens" — with
@@ -184,14 +190,19 @@ Then re-run **one** document — an env change needs `--force-recreate`, a plain
 will not pick it up:
 
 ```bash
-docker compose up -d --build --force-recreate celery_worker_ingestion
-docker compose logs -f celery_worker_ingestion | tee f18.log
+docker compose up -d --build --force-recreate celery_worker_upload
+docker compose logs -f celery_worker_upload | tee f18.log
 
 grep "VLM call #"        f18.log   # out= well under 384, no elapsed over ~15s
 grep "done=length"       f18.log   # ideally empty; if not, raise OLLAMA_VLM_NUM_PREDICT
 grep -c "too thin"       f18.log   # ~113 strips skipped that used to be sent
-grep "parse_pdf summary" f18.log   # vlm_calls ≈ 78, vlm_wait ≈ 150-300s
+grep "parse_pdf summary" f18.log   # measured: vlm_calls 79, vlm_wait 592s
 ```
+
+> **Correction.** This block originally named `celery_worker_ingestion`. API uploads never
+> reach that worker: `document_routes.py:89` pins the whole parse→chunk→embed chain to the
+> **`upload`** queue via `.set(queue=UPLOAD_QUEUE)`. Tailing the ingestion worker is why an
+> early run appeared to stall.
 
 Pass condition on the same document: **`vlm_wait` under ~400s** against the 2245s
 baseline, and no single call over ~15s. `vlm_failures` should be unchanged.
@@ -202,14 +213,36 @@ existed inside a skipped strip.
 
 ---
 
+## F21 — the docling half, in its own document
+
+This document ends with the VLM accounting for a shrinking share of the parse and docling
+for 79% of it. That framing turned out to be misleading: docling was fast everywhere except
+**one batch of 50 pages**, which alone was 42% of all docling time — the book's index,
+handed to TableFormer as dense multi-column tables.
+
+`docs/20260811_tableformer_outlier_and_prompt_v2.md` measures it, switches the TableFormer
+structure decoder to `fast` (that batch: 555s → 121s, with an artifact structurally
+identical to the `accurate` one), and takes the image prompt through two more versions plus
+a `_strip_html_wrappers()` sanitizer for the format rules a 0.8B model will not obey.
+Total 1683s → **1045s**, filler clauses 15 → **3**, peak RSS 2524 → **2000 MB**.
+
+---
+
 ## Still to verify
 
 1. **Unit tests.** Deliberately left to the author of this change's follow-up: the
    `options` payload, the `done=length` warning, and the short-side gate (a 218×54
    `PictureItem` must produce no `_call_vlm` call, a 218×160 one must). The existing
    `tests/unit/test_ollama_vlm_call.py` and `test_vlm_table_routing.py` are the pattern.
-2. **The full-document re-measure.** The ~10× is extrapolated from the probe above, not
-   observed end to end. Until that run exists, treat 150–300s as a projection.
+2. ~~**The full-document re-measure.**~~ **Done — measured 2026-08-10.** The full 504-page
+   run gave `vlm_calls=79`, `vlm_wait=592s`, `total=2194s`, `vlm_failures=0`, mean output
+   ~318 tok with **28 of 79 calls truncated** at the `num_predict` ceiling. The projection
+   of 150–300s above was wrong by roughly 2–4×. It came from a synthetic-crop probe, which
+   turned out to predict output *variance* correctly and output *level* badly: real figures
+   from the document are far denser than the probe crops, so the model wrote much more.
+   Prompt v1 (F19) then brought this to 348s / 160 tok / 0 truncations, and prompt v3
+   (F21) to **261s / 109 tok / 1 truncation**. See
+   `docs/20260811_tableformer_outlier_and_prompt_v2.md`.
 3. **Output quality on real figures at `temperature: 0`.** The smoke test's second call
    emitted an HTML `<picture style="font-family: …">` fragment, which is a prompt problem
    rather than a sampling one, but greedy decoding will make whatever the prompt elicits

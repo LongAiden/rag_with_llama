@@ -18,16 +18,65 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RPM_LIMIT = 10
 _DEFAULT_COMPLEX_TABLE_ROWS = 8
 _DEFAULT_COMPLEX_TABLE_COLS = 6
-_DEFAULT_IMAGES_SCALE = 0.75
+# Docling renders page images at 72 * images_scale DPI, and _expand_and_crop cuts
+# every VLM crop out of that page image — so this single number decides whether
+# the VLM can read anything. It was effectively 0.6 (OllamaPDFParser overrode the
+# old 0.75 default and nothing exposed it), i.e. 43 DPI, at which an 8pt glyph is
+# 5px tall. Measured consequence over a 504-page run: output length was inversely
+# correlated with crop area — the four longest descriptions were the four
+# SMALLEST crops (218x96 -> 384 tok and truncated, 200x67 -> 362, 211x85 -> 325,
+# 187x72 -> 311) while the largest crops came back at 227-263 tok. A full-width
+# screenshot of the NLTK downloader arrived as 218x96px and was described as an
+# invented ID/Name/Department/Salary table repeated six times. That is
+# confabulation from an illegible input, not verbosity, and no prompt fixes it:
+# three prompt versions failed on that one crop, and v3's explicit
+# "write exactly: Unclear image." escape hatch went unused in 79 of 79 calls.
+#
+# 2.0 = 144 DPI, 16px for an 8pt glyph. Costs checked before adopting: a Letter
+# page is ~5.8MB, so ~290MB per 50-page batch against ~1.5G of headroom, and
+# ~+270 image tokens (~+0.3s) per call in prefill. Decode dominates latency and
+# should shorten as the model stops guessing.
+_DEFAULT_IMAGES_SCALE = 2.0
 _DEFAULT_MIN_IMAGE_PX = 150
-# Short-side floor. The both-dimensions rule above only ever caught square
-# icons, so every full-column 40-60px-tall strip — rules, equation lines, header
-# bands — still went to the VLM: 113 of 191 calls in a 504-page run were under
-# 64px tall and burned 1348s (60% of the VLM budget) producing invented
-# descriptions that then get embedded. At images_scale 0.6, 64px is ~1.5in on
-# the page; real figures clear it.
-_DEFAULT_MIN_IMAGE_SHORT_PX = 64
+# Short-side floor, in POINTS (1/72in) rather than rendered pixels, so it keeps
+# its meaning when _DEFAULT_IMAGES_SCALE moves. The both-dimensions rule above
+# only ever caught square icons, so every full-column 40-60px-tall strip — rules,
+# equation lines, header bands — still went to the VLM: 113 of 191 calls in a
+# 504-page run were under the floor and burned 1348s (60% of the VLM budget)
+# producing invented descriptions that then get embedded.
+#
+# 107pt ~= 1.48in. This reproduces the previous behaviour exactly: the old
+# constant was 64 pixels at images_scale 0.6, and 107 * 0.6 = 64.2. Expressed in
+# pixels it would have silently become a 0.44in gate at scale 2.0, admitting
+# every thin strip it exists to reject.
+_DEFAULT_MIN_IMAGE_SHORT_PT = 107
+# Crop padding, also in points, for the same reason. 13pt * 0.6 = 7.8 ~= the 8px
+# it replaces, so behaviour at the old scale is unchanged. Because the gate
+# measures the padded crop, the two constants together define the real floor:
+# an item passes when (content_pt + 2*13) >= 107, i.e. content >= 81pt — at any
+# images_scale, which is the whole point. Leaving this at a fixed 8px made the
+# floor 80pt at scale 0.6 but 99pt at scale 2.0 and silently dropped 9 figures.
+_DEFAULT_CROP_PADDING_PT = 13
 _DOCLING_PAGE_BATCH_SIZE = 50
+# TableFormer structure decoder: "accurate" or "fast". docling time on a 504-page
+# book is not uniform — pages 451-500 (the dense multi-column index, which the
+# layout model classifies as tables) took 554.8s at 11.10 s/page against 1.47
+# s/page across the seven healthy batches: 42% of all docling time in one batch
+# of 50, reproduced three times.
+#
+# "fast" because it is a large win at no measured cost. Isolated on those 50
+# pages: 540.8s -> 129.7s (-76%) with tables=15 under both modes. Over the whole
+# document: that batch 554.8s -> 121.1s, docling 1333s -> 782s, and the artifact
+# is structurally identical to the "accurate" one — 67 <table>, 66 closers, 1
+# empty block, the same counts either way. Disabling do_cell_matching on top of
+# this saves a further 3.5% (129.7s -> 125.1s), which is not worth the cell
+# accuracy, so _build_converter keeps it on.
+#
+# Both checkpoints ship in the same HF snapshot (fast 139 MB, accurate 203 MB),
+# so switching costs no download. Set DOCLING_TABLEFORMER_MODE=accurate to revert
+# if a document type shows table loss; an unknown value falls back to docling's
+# own default with a warning rather than failing the parse.
+_DEFAULT_TABLEFORMER_MODE = "fast"
 # 1, not 2: Ollama runs on the same host and serializes on one GPU. Measured on
 # an M1 with think disabled — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
 _VLM_CONCURRENCY = 1
@@ -126,6 +175,31 @@ def _fix_table_closing_tags(md: str) -> str:
         else:
             result.append(line)
     return "\n".join(result)
+
+
+def _strip_html_wrappers(md: str) -> str:
+    """Unwrap HTML block tags from VLM prose and put the description on its own line.
+
+    `qwen3.5:0.8b` wraps descriptions in <p>/<div>/<span> and frequently emits the
+    description on the </figure_type> line itself. Measured over an 80-page probe:
+    7 stray <p> and 1 <div> across 17 descriptions, and 8 of 17 inline — against
+    2 of 79 inline in the previous full run. Three rounds of prompt rules, the
+    last of which said "Do NOT use HTML tags (<p>, <div>, <span>)" and "Put the
+    description on the NEXT line" in as many words, moved neither number. At 0.8B
+    the model does not reliably honour negative formatting constraints, so these
+    are normalised here, where the outcome is guaranteed rather than requested.
+
+    <figure>, <figure_type> and <table> are deliberately left alone: they are the
+    structural tags the assembler and `_strip_stray_headers` depend on.
+    """
+    # Closing block tags are paragraph breaks; opening tags carry no content.
+    md = re.sub(r"</(?:p|div)\s*>", "\n", md, flags=re.IGNORECASE)
+    md = re.sub(r"<(?:p|div|span)\b[^>]*>", "", md, flags=re.IGNORECASE)
+    md = re.sub(r"</span\s*>", "", md, flags=re.IGNORECASE)
+    # Move description text that landed on the </figure_type> line onto the next.
+    md = re.sub(r"(</figure_type>)[ \t]*(?=\S)", r"\1\n", md, flags=re.IGNORECASE)
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return md.strip()
 
 
 def _strip_stray_headers(md: str) -> str:
@@ -261,7 +335,8 @@ class GeminiDoclingParser(PDFParserBase):
         page_batch_size: int = _DOCLING_PAGE_BATCH_SIZE,
         vlm_concurrency: int = _VLM_CONCURRENCY,
         vlm_tables: bool = _DEFAULT_VLM_TABLES,
-        min_image_short_px: int = _DEFAULT_MIN_IMAGE_SHORT_PX,
+        min_image_short_pt: float = _DEFAULT_MIN_IMAGE_SHORT_PT,
+        tableformer_mode: str = _DEFAULT_TABLEFORMER_MODE,
     ):
         self._api_key = api_key
         self._gemini_model = gemini_model
@@ -273,12 +348,24 @@ class GeminiDoclingParser(PDFParserBase):
         self._h2_min_height = h2_min_height
         self._h3_min_height = h3_min_height
         self._min_image_px = min_image_px
-        self._min_image_short_px = min_image_short_px
+        self._min_image_short_pt = min_image_short_pt
+        # Resolved once: the gate is authored in points but compared against
+        # rendered pixels, and the two only agree at one value of images_scale.
+        self._min_image_short_px = int(round(min_image_short_pt * images_scale))
+        logger.info(
+            "VLM image gate: %.0fpt (%.2fin) = %dpx at images_scale %.2f (%.0f DPI)",
+            min_image_short_pt,
+            min_image_short_pt / 72.0,
+            self._min_image_short_px,
+            images_scale,
+            72.0 * images_scale,
+        )
         self._max_pages = max_pages
         self._docling_num_threads = docling_num_threads
         self._page_batch_size = page_batch_size
         self._vlm_concurrency = vlm_concurrency
         self._vlm_tables = vlm_tables
+        self._tableformer_mode = tableformer_mode
         self._genai_model = None
 
         # VLM counters are written from `vlm_concurrency` pool threads. Without
@@ -294,6 +381,32 @@ class GeminiDoclingParser(PDFParserBase):
 
     # ── Docling converter ─────────────────────────────────────────────────────
 
+    def _resolve_tableformer_mode(self):
+        """Map the configured mode string onto docling's `TableFormerMode`.
+
+        Returns None when the enum is missing or the string is unrecognised, in
+        which case `TableStructureOptions` keeps its own default. A typo in an
+        env var must not take the parse down.
+        """
+        try:
+            from docling.datamodel.pipeline_options import TableFormerMode
+        except ImportError:
+            logger.warning(
+                "TableFormerMode not importable in this docling version; "
+                "using the built-in table structure default"
+            )
+            return None
+        try:
+            return TableFormerMode(str(self._tableformer_mode).strip().lower())
+        except ValueError:
+            logger.warning(
+                "Unknown DOCLING_TABLEFORMER_MODE %r; expected one of %s. "
+                "Falling back to the built-in default.",
+                self._tableformer_mode,
+                [m.value for m in TableFormerMode],
+            )
+            return None
+
     def _build_converter(self):
         from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
         from docling.datamodel.base_models import InputFormat
@@ -303,7 +416,11 @@ class GeminiDoclingParser(PDFParserBase):
         opts = PdfPipelineOptions()
         opts.do_ocr = False
         opts.do_table_structure = True
-        opts.table_structure_options = TableStructureOptions(do_cell_matching=True)
+        ts_kwargs = {"do_cell_matching": True}
+        mode = self._resolve_tableformer_mode()
+        if mode is not None:
+            ts_kwargs["mode"] = mode
+        opts.table_structure_options = TableStructureOptions(**ts_kwargs)
         opts.accelerator_options = AcceleratorOptions(
             num_threads=self._docling_num_threads, device=AcceleratorDevice.AUTO
         )
@@ -362,6 +479,7 @@ class GeminiDoclingParser(PDFParserBase):
     def _call_vlm(self, pil_img: PILImage.Image, prompt: str) -> str:
         raw = self._call_gemini(pil_img, prompt)
         raw = _strip_code_fences(raw)
+        raw = _strip_html_wrappers(raw)
         raw = _strip_stray_headers(raw)
         raw = _normalize_tables_in_markdown(raw)
         return raw
@@ -417,7 +535,7 @@ class GeminiDoclingParser(PDFParserBase):
                 result.append(item)
         return result
 
-    def _expand_and_crop(self, doc, page_no: int, bboxes, padding: int = 8):
+    def _expand_and_crop(self, doc, page_no: int, bboxes, padding_pt: float = _DEFAULT_CROP_PADDING_PT):
         page = doc.pages.get(page_no)
         if page is None or page.image is None or page.image.pil_image is None:
             return None
@@ -429,6 +547,11 @@ class GeminiDoclingParser(PDFParserBase):
         r = max(b.r for b in bboxes)
         t = max(b.t for b in bboxes)
         sc = self._images_scale
+        # Padding scales with the render, or the short-side gate silently tightens
+        # as resolution rises: the gate sees crop = content*scale + 2*padding, so a
+        # fixed 8px pad made the effective page-space floor 80pt at scale 0.6 but
+        # 99pt at scale 2.0 — 24% stricter, which dropped 9 real figures.
+        padding = max(1, int(round(padding_pt * sc)))
         pix_l = max(0,     int(l * sc) - padding)
         pix_t = max(0,     int((ph - t) * sc) - padding)
         pix_r = min(img_w, int(r * sc) + padding)

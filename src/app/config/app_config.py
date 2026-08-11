@@ -108,6 +108,15 @@ class AppSettings(BaseSettings):
     # code edits. See docs/20260804_ingestion_performance_investigation.md.
     docling_num_threads: int = Field(default=2, validation_alias='DOCLING_NUM_THREADS')
     docling_page_batch_size: int = Field(default=50, validation_alias='DOCLING_PAGE_BATCH_SIZE')
+    # TableFormer structure decoder: "accurate" or "fast". Docling time is not
+    # uniform across a document — in a 504-page run one batch of 50 pages (the
+    # dense multi-column index, classified as tables by the layout model) cost
+    # 554.8s at 11.10 s/page against 1.47 s/page elsewhere, 42% of all docling
+    # time. "fast" cut that batch to 121.1s and total docling 1333s -> 782s while
+    # producing a structurally identical artifact (67 tables either way), so it
+    # is the default. Set to "accurate" to revert if a document type shows table
+    # loss. An unrecognised value logs and falls back to docling's own default.
+    docling_tableformer_mode: str = Field(default='fast', validation_alias='DOCLING_TABLEFORMER_MODE')
     # 1: Ollama runs on the same host and serializes on one GPU. Measured on an
     # M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
     vlm_concurrency: int = Field(default=1, validation_alias='VLM_CONCURRENCY')
@@ -125,11 +134,20 @@ class AppSettings(BaseSettings):
     # Hard ceiling for the tail, not the primary lever — 384 leaves headroom
     # over the ~126-token honest description of a real figure.
     ollama_vlm_num_predict: int = Field(default=384, validation_alias='OLLAMA_VLM_NUM_PREDICT')
-    # Short-side floor for sending a picture to the VLM. 113 of 191 calls in a
-    # 504-page run were strips under 64px tall — rules and equation lines, not
-    # figures — and they consumed 60% of the VLM budget hallucinating content
-    # that then gets embedded.
-    vlm_min_image_short_px: int = Field(default=64, validation_alias='VLM_MIN_IMAGE_SHORT_PX')
+    # Page render resolution: docling renders at 72 * scale DPI and every VLM crop
+    # is cut out of that page image, so this decides whether the model can read
+    # anything at all. It was pinned at 0.6 (43 DPI, a 5px-tall 8pt glyph) with no
+    # way to change it, and the measured result was confabulation: output length
+    # ran INVERSELY to crop area, and a full-width screenshot delivered as 218x96px
+    # came back as an invented salary table repeated six times. 2.0 = 144 DPI.
+    # Costs ~290MB per 50-page batch and ~+0.3s/call of prefill.
+    vlm_images_scale: float = Field(default=2.0, validation_alias='VLM_IMAGES_SCALE')
+    # Short-side floor for sending a picture to the VLM, in POINTS so it survives a
+    # change to vlm_images_scale. 113 of 191 calls in a 504-page run were strips
+    # below this floor — rules and equation lines, not figures — and they consumed
+    # 60% of the VLM budget hallucinating content that then gets embedded.
+    # 107pt (1.48in) reproduces the previous 64px-at-scale-0.6 gate exactly.
+    vlm_min_image_short_pt: float = Field(default=107.0, validation_alias='VLM_MIN_IMAGE_SHORT_PT')
     # Tables go to docling's TableFormer. A 0.8B VLM cannot read them — on
     # bert.pdf the 13-column GLUE table came back with headers "I, II, III, IV…"
     # and a small table came back with invented rows. Set true to restore the

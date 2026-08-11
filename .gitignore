@@ -48,6 +48,7 @@ htmlcov/
 *.cursorrules
 
 *.claude
+*.opencode
 
 # Temporary and backup files
 *.tmp
