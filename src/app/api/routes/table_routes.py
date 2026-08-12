@@ -91,6 +91,7 @@ async def delete_table(
                 "table_name": table_name,
                 "estimated_rows_deleted": result["estimated_rows_deleted"],
                 "documents_removed": result["documents_removed"],
+                "domain_removed": result["domain_removed"],
                 "timestamp": str(uuid.uuid1().time),
             }
 

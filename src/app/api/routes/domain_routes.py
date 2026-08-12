@@ -134,7 +134,11 @@ async def delete_domain(
                 forget_pipeline=forget_pipeline,
                 missing_table_ok=True,
             )
-            await repo.delete_domain(name)
+            # drop_chunk_table deletes the domain row by table_name. If the domain
+            # name differs from the table_name (future schema allows this), delete
+            # the domain row by name as well.
+            if domain["name"] != domain["table_name"]:
+                await repo.delete_domain(name)
 
             logfire.info(
                 "Domain deletion completed",

@@ -1,10 +1,10 @@
 """Shared chunk-table teardown, used by DELETE /table/{name} and DELETE /domains/{name}.
 
-Dropping a chunk table is three coupled steps, not one. Doing only the DROP leaves
+Dropping a chunk table is four coupled steps, not one. Doing only the DROP leaves
 the ingestion status rows behind at stage='embedded' pointing at a table that no
-longer exists, and leaves a stale pipeline (with its embedding model and pool)
-cached against the dead table. Both endpoints need all three, so the sequence lives
-here rather than being duplicated.
+longer exists, leaves a stale pipeline (with its embedding model and pool) cached
+against the dead table, and leaves an orphaned domain registry row. All three
+endpoints need all four, so the sequence lives here rather than being duplicated.
 """
 
 from typing import Any, Dict
@@ -12,7 +12,7 @@ from typing import Any, Dict
 import logfire
 from fastapi import HTTPException
 
-from app.infra.db import IngestionRepository, TableRepository
+from app.infra.db import DomainRepository, IngestionRepository, TableRepository
 
 
 async def drop_chunk_table(
@@ -22,7 +22,7 @@ async def drop_chunk_table(
     forget_pipeline,
     missing_table_ok: bool = False,
 ) -> Dict[str, Any]:
-    """Drop a chunk table, delete its ingestion status rows, and evict its pipeline.
+    """Drop a chunk table, delete its ingestion status rows, evict its pipeline, and remove its domain.
 
     Args:
         table_name: Chunk table to drop. Must already be validated by the caller.
@@ -34,7 +34,7 @@ async def drop_chunk_table(
             (a domain created but never uploaded to has no table yet).
 
     Returns:
-        Dict with `table_existed`, `estimated_rows_deleted`, and `documents_removed`.
+        Dict with `table_existed`, `estimated_rows_deleted`, `documents_removed`, and `domain_removed`.
 
     Raises:
         HTTPException: 404 if the table does not exist and `missing_table_ok` is False.
@@ -82,6 +82,17 @@ async def drop_chunk_table(
             documents_removed=len(removed),
         )
 
+    # Remove the domain registry row if it exists. Without this, the domain list
+    # shows stale entries for tables that have been deleted.
+    with logfire.span("domain_registry_cleanup"):
+        domain_repo = DomainRepository(connection_string=config.connection_string)
+        domain_removed = await domain_repo.delete_domain(table_name)
+        logfire.info(
+            "Domain registry row removed",
+            table_name=table_name,
+            domain_removed=domain_removed,
+        )
+
     if forget_pipeline is not None:
         forget_pipeline(table_name)
     elif table_name == pipeline_instance.vector_store.table_name:
@@ -92,4 +103,5 @@ async def drop_chunk_table(
         "table_existed": table_exists,
         "estimated_rows_deleted": row_count,
         "documents_removed": len(removed),
+        "domain_removed": domain_removed,
     }

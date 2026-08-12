@@ -224,7 +224,7 @@ Only if Step 0 showed the out-of-band cost is material. On `celery_worker_upload
 documents, so watch `peak_rss` in the summary line across four consecutive documents before
 keeping the change. Revert on any upward trend — an OOM-killed worker costs more than 60s.
 
-### Step 4 — Cheap config experiment: threads 4 → 6 — **APPLIED 2026-08-12, unmeasured**
+### Step 4 — Cheap config experiment: threads 4 → 6 — **APPLIED + MEASURED 2026-08-12: keep**
 
 The VM has 6 CPUs; the workers were capped at 4.0 and docling was told to use 4 threads.
 Both raised to 6 on `celery_worker_upload` and `celery_worker_ingestion` (same image, same
@@ -238,11 +238,32 @@ slower, and Ollama shares the host. Measure `Converted pages … rate=Xs/page` o
 document and page range — F12's lesson is that document complexity alone produces a 4×
 difference, so cross-document comparisons are meaningless.
 
-**This is applied but not yet measured.** Revert both to 4 if the rate does not improve.
-Watch `peak_rss` on the summary line too: more concurrent work in flight is precisely what
-consumed the headroom the last time docling throughput went up.
+**Measured** on the same 504-page NLTK.pdf, F23 code:
 
-### Step 5 — Overlap VLM wait with the next batch's convert (code)
+```
+parse_pdf summary: pages=504 total=1035s docling=749s (72%) assembly=286s (28%)
+                   vlm_wait=281s vlm_calls=86 vlm_failures=0 peak_rss=2886MB
+```
+
+| metric | F21 | F22 (144 DPI) | this run |
+|---|---|---|---|
+| total | 1045s | 1083s | **1035s** |
+| docling | 782s | ~820s (est: F21 + the +38s 144 DPI delta) | **749s** |
+| vlm_wait / calls | 261s / 79 | — | 281s / 86 |
+| peak RSS | 2000 MB | 2965 MB | 2886 MB |
+
+**Verdict: keep the 6.** Docling fell ~820s → 749s, about **9%** — a real gain but
+sub-linear, exactly as predicted: threads 5 and 6 land on efficiency cores. Peak RSS did not
+rise (2886 vs F22's 2965), so the headroom warning did not materialise. Per-VLM-call cost is
+unchanged at 3.27s; `vlm_wait` rose only because F23's figure wrapping produced 7 more calls.
+
+Total is still ~17 minutes, and the shape is unchanged — docling 72%, VLM 27%, no overlap.
+Step 5 is now the live work, promoted to `docs/plans/20260812_parse_pipelining.md`.
+
+### Step 5 — Overlap VLM wait with the next batch's convert (code) — **promoted to its own plan**
+
+> Designed in full at `docs/plans/20260812_parse_pipelining.md` (2026-08-12), against the
+> measured 281s / 86 calls rather than the 261s / 79 sketched below. Read that instead.
 
 The ceiling is the full 261s (24%) and it is the largest win available *without* leaving
 Docker. Currently: convert batch N → assemble batch N (blocking on 79 VLM futures across the

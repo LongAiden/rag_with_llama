@@ -23,10 +23,12 @@ def _make_app():
 
     mock_config = MagicMock()
     mock_config.pipeline = None
+    mock_config.connection_string = "postgresql://test:test@localhost/test"
 
     mock_conn = AsyncMock()
     mock_conn.fetchrow = AsyncMock(return_value={"table_exists": True, "estimated_rows": 5})
-    mock_conn.execute = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value=True)
+    mock_conn.execute = AsyncMock(return_value="DELETE 0")
 
     mock_vector_store = MagicMock()
     mock_vector_store.table_name = "some_other_table"
@@ -48,12 +50,23 @@ def _make_app():
         table_name: str,
         x_app_password: Optional[str] = Header(default=None),
     ):
-        return await delete_table(
-            table_name=table_name,
-            x_app_password=x_app_password,
-            config=mock_config,
-            get_pipeline=mock_get_pipeline,
-        )
+        with patch("app.api.routes.table_deletion.IngestionRepository") as mock_ing_repo_cls, \
+             patch("app.api.routes.table_deletion.DomainRepository") as mock_dom_repo_cls:
+            mock_ing_repo = AsyncMock()
+            mock_ing_repo.delete_documents_for_table = AsyncMock(return_value=[])
+            mock_ing_repo_cls.return_value = mock_ing_repo
+
+            mock_dom_repo = AsyncMock()
+            mock_dom_repo.delete_domain = AsyncMock(return_value=False)
+            mock_dom_repo_cls.return_value = mock_dom_repo
+
+            return await delete_table(
+                table_name=table_name,
+                x_app_password=x_app_password,
+                config=mock_config,
+                get_pipeline=mock_get_pipeline,
+                forget_pipeline=None,
+            )
 
     return app
 
