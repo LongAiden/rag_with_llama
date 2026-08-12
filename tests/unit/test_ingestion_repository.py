@@ -420,12 +420,12 @@ class TestQueryMethods:
         _, conn = mock_pool
         conn.fetchrow = AsyncMock(return_value={"?column?": 1})
 
-        result = await repo.is_path_registered("/app/input/raw/uuid_test.pdf")
+        result = await repo.is_path_registered("/app/data/input/raw/uuid_test.pdf")
 
         assert result is True
         sql, *params = conn.fetchrow.call_args[0]
         assert "raw_storage_path = $1" in sql
-        assert params[0] == "/app/input/raw/uuid_test.pdf"
+        assert params[0] == "/app/data/input/raw/uuid_test.pdf"
 
     @pytest.mark.asyncio
     async def test_delete_document_returns_deleted_row(self, repo, mock_pool):
@@ -434,7 +434,7 @@ class TestQueryMethods:
         conn.fetchrow = AsyncMock(return_value={
             "id": "test-doc-id",
             "file_name": "test.pdf",
-            "raw_storage_path": "/app/input/raw/uuid_test.pdf",
+            "raw_storage_path": "/app/data/input/raw/uuid_test.pdf",
         })
 
         result = await repo.delete_document("test-doc-id")

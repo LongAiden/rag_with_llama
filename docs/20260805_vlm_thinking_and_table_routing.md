@@ -22,7 +22,7 @@ assumptions do not hold:
 
 Rather than wait for the hour-long baseline, the VLM was measured directly against the
 local Ollama (0.32.5, `qwen3.5:0.8b`), using synthetic images first and then real page
-crops from `input/raw/…_bert.pdf`. The result reframes the problem: the dominant cost was
+crops from `data/input/raw/…_bert.pdf`. The result reframes the problem: the dominant cost was
 never docling, and one of the fixes is to stop calling the VLM for a job it cannot do.
 
 ---
@@ -94,7 +94,7 @@ the configuration F5 was written against.
 
 ## F16 — a 0.8B VLM cannot read tables, and the routing rule sent it the hardest ones
 
-Real crops from `input/raw/…_bert.pdf` (the BERT paper), `think: false`:
+Real crops from `data/input/raw/…_bert.pdf` (the BERT paper), `think: false`:
 
 | Content | Latency | Output |
 |---|---|---|

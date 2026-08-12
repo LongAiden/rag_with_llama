@@ -88,7 +88,7 @@ class AppSettings(BaseSettings):
     celery_ingestion_queue: str = Field(default='ingestion', validation_alias='CELERY_INGESTION_QUEUE')
 
     # Ingestion pipeline settings
-    input_raw_dir: str = Field(default='input/raw', validation_alias='INPUT_RAW_DIR')
+    input_raw_dir: str = Field(default='data/input/raw', validation_alias='INPUT_RAW_DIR')
     # Derived, inspectable artifacts written by the parse and chunk stages. The DB
     # remains the source of truth; these exist so chunk boundaries can be read on
     # disk instead of queried out of JSONB.

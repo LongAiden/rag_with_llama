@@ -68,7 +68,7 @@ COPY docs/images/ ./docs/images/
 
 # Required directories for runtime state. data/parsed and data/chunks hold the
 # per-stage ingestion artifacts written by the parse and chunk stages.
-RUN mkdir -p /app/data/parsed /app/data/chunks /app/logs /app/input/raw
+RUN mkdir -p /app/data/parsed /app/data/chunks /app/data/input/raw /app/logs
 
 # Security: Run as non-root user
 RUN useradd -m -u 1000 appuser && \

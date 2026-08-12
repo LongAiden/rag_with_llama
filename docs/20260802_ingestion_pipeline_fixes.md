@@ -119,7 +119,7 @@ Uploads are written to disk as `<uuid>_<name>` but registered under `<name>`. Th
 
 ### B8. Path traversal on the upload filename
 
-`INPUT_RAW_DIR / f"{document_id}_{file.filename}"` — FastAPI does not sanitise `UploadFile.filename`, so a name like `../../../app/worker/celery_app.py` escaped `input/raw/`.
+`INPUT_RAW_DIR / f"{document_id}_{file.filename}"` — FastAPI does not sanitise `UploadFile.filename`, so a name like `../../../app/worker/celery_app.py` escaped `data/input/raw/`.
 
 **Fix** — `Path(file.filename).name` strips any directory component before the path is built. `validate_table_name()` is now also applied on `/upload`; only the delete route had been checking it, though the upload value reaches DDL through the vector store.
 
@@ -217,7 +217,7 @@ FROM document_chunks WHERE document_id = '<id>' LIMIT 10;
 
 **7. Dedupe + delete** — re-upload the same filename and expect `status="duplicate"` with the original id. Then `DELETE /documents/{id}` and confirm the status row, both artifacts, the chunks and the raw file are gone, and that re-uploading ingests fresh.
 
-**8. B7** — with an already-ingested file in `input/raw/`:
+**8. B7** — with an already-ingested file in `data/input/raw/`:
 
 ```bash
 docker compose exec celery_worker_ingestion \

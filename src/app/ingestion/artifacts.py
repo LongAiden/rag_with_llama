@@ -14,7 +14,7 @@ Layout::
         0001.md
         index.json                           per-chunk metadata
 
-The `<document_id>_<stem>` naming mirrors `input/raw/<document_id>_<filename>`,
+The `<document_id>_<stem>` naming mirrors `data/input/raw/<document_id>_<filename>`,
 so a document's raw, parsed, and chunked forms all sort together under the same
 prefix.
 

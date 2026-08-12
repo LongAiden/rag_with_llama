@@ -21,7 +21,7 @@ The default embedding model is **all-MiniLM-L6-v2** (384-dim). The default reran
 
 ```
 Raw file  →  documents status DB  →  parse  →  chunk  →  embed  →  pgvector  →  query + rerank  →  LLM answer
-input/raw/        one row per file         chunker    embedding    chunk table   BM25 / RRF / cross-encoder   Gemini / Ollama
+data/input/raw/   one row per file         chunker    embedding    chunk table   BM25 / RRF / cross-encoder   Gemini / Ollama
                 (stage-based, claim/retry)     │          │
                                         data/parsed/  data/chunks/<doc>/
                                         (inspectable artifacts, gitignored)
@@ -45,12 +45,13 @@ puts `src/` on the path locally; the Docker images set `PYTHONPATH=/app/src`.
 | `src/app/models/` | Pydantic request/response schemas |
 | `src/app/retrieval/` | Search, reranking, and LLM answer generation |
 | `src/app/worker/` | Celery app and stage-based ingestion tasks |
-| `input/raw/` | Original uploaded / scanned files (gitignored) |
+| `data/input/raw/` | Original uploaded / scanned files (gitignored) |
 | `data/parsed/` | Markdown written by the parse stage (gitignored, regenerable) |
 | `data/chunks/` | One folder per document written by the chunk stage (gitignored) |
+| `data/temp_uploads/` | Temporary upload staging area (gitignored, regenerable) |
 | `deploy/migrations/` | SQL schema files applied by Postgres on first volume creation |
 | `deploy/deployment/` | Dockerfiles, `requirements.txt`, Makefile |
-| `tests/` | `unit/` (no DB) and `integration/` (requires Postgres) |
+| `tests/` | `unit/` (no DB) and `integration/` (requires Postgres); `htmlcov/` for coverage reports |
 | `docs/` | Architecture decisions, design notes, and runbooks |
 | `experiments/` | Scratch notebooks and scripts, reference only |
 
@@ -97,7 +98,7 @@ Every input file gets exactly one row in `documents`.
 | `file_name` | Display filename (no longer unique, see migration 005) |
 | `doc_name` | Human-readable document name from upload; defaults to the filename stem — added in migration 006 |
 | `domain` | Domain this document belongs to; FK to `domains(name)` — added in migration 006 |
-| `raw_storage_path` | Absolute path to the file in `input/raw/` |
+| `raw_storage_path` | Absolute path to the file in `data/input/raw/` |
 | `stage` | `registered` → `parsing` → `parsed` → `chunking` → `chunked` → `embedding` → `embedded` / `error` / `failed` |
 | `attempts` | Number of failures so far |
 | `claimed_at` / `claimed_by` | Worker lease for coordination |
@@ -304,7 +305,7 @@ Key environment variables (see [`.env.example`](../.env.example) for the full li
 | `GEMINI_MODEL` | Gemini model for Q&A / parsing |
 | `PDF_PARSER_BACKEND` | `ollama` or `gemini-docling` |
 | `CHUNKER_TYPE` | `markdown` (default), `recursive`, `token`, `semantic` |
-| `INPUT_RAW_DIR` | Where raw files are stored |
+| `INPUT_RAW_DIR` | Where raw files are stored (default `data/input/raw`) |
 | `PARSED_DIR` | Where parse-stage markdown is dumped (default `data/parsed`) |
 | `CHUNKS_DIR` | Where chunk-stage folders are dumped (default `data/chunks`) |
 | `PERSIST_INGESTION_ARTIFACTS` | Set false to skip both dumps (default true) |

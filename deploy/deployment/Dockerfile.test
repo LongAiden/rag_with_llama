@@ -41,7 +41,7 @@ COPY pytest.ini ./pytest.ini
 # This allows for live test development without rebuilding the image
 
 # Create required directories
-RUN mkdir -p /app/data/parsed /app/data/chunks /app/logs /app/input/raw /app/htmlcov /app/tests
+RUN mkdir -p /app/data/parsed /app/data/chunks /app/data/temp_uploads /app/data/input/raw /app/logs /app/tests/htmlcov /app/tests
 
 # Default command runs all tests
 CMD ["pytest", "-v", "--cov=app", "--cov-report=html", "--cov-report=term"]

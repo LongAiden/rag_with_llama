@@ -535,11 +535,11 @@ Delete the probe artifact: `rm -f data/parsed/_f21_probe.md`.
 ### Step 4 — cleanup left over from the F19 run
 
 ```bash
-rm -f input/raw/91d5e345-31d0-4919-be16-24a781e9bdf0_NLTK.pdf
-rm -f temp_uploads/*_NLTK.pdf
+rm -f data/input/raw/91d5e345-31d0-4919-be16-24a781e9bdf0_NLTK.pdf
+rm -f data/temp_uploads/*_NLTK.pdf
 ```
 
-The orphan in `input/raw/` matters: `_register_and_dispatch` runs `_scan_input_dir(repo)`,
+The orphan in `data/input/raw/` matters: `_register_and_dispatch` runs `_scan_input_dir(repo)`,
 which re-registers any unknown file it finds there.
 
 ### Step 5 — documentation

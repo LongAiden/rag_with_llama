@@ -49,7 +49,7 @@ test-watch: ## Run tests in watch mode (requires pytest-watch)
 
 coverage: ## Generate coverage report locally
 	pytest tests/ --cov=. --cov-report=html --cov-report=term
-	@echo "Coverage report generated in htmlcov/index.html"
+	@echo "Coverage report generated in tests/htmlcov/index.html"
 
 # ============================================
 # Cleanup
@@ -57,7 +57,7 @@ coverage: ## Generate coverage report locally
 
 clean-test: ## Clean test artifacts
 	rm -rf .pytest_cache
-	rm -rf htmlcov
+	rm -rf tests/htmlcov
 	rm -rf .coverage
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete

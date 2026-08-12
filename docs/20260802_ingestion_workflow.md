@@ -19,7 +19,7 @@ The embedding logic itself is unchanged; it is simply invoked from the last stag
 
 ## Filesystem
 
-- `input/raw/` — original files dropped by the API upload or by the weekly scan.
+- `data/input/raw/` — original files dropped by the API upload or by the weekly scan.
 - `input/markdown/` is no longer used; parsed data lives in `document_parsed`.
 
 ## Celery queues
@@ -35,7 +35,7 @@ The embedding logic itself is unchanged; it is simply invoked from the last stag
 ```text
 id                   -- UUID string, also used as document_id in chunks
 file_name            -- unique filename used for POC dedupe
-raw_storage_path     -- path to the file in input/raw/
+raw_storage_path     -- path to the file in data/input/raw/
 stage                -- registered | parsing | parsed | chunking | chunked | embedding | embedded | error | failed
 attempts             -- how many times the file has failed
 claimed_at / claimed_by -- worker lease for coordination
@@ -47,7 +47,7 @@ last_error           -- last exception message
 
 ## Schedules
 
-- **Weekly** (Sunday 00:00): `register_and_dispatch_task` scans `input/raw/`, registers new files, resets stale claims, retries errored documents, and dispatches processing chains.
+- **Weekly** (Sunday 00:00): `register_and_dispatch_task` scans `data/input/raw/`, registers new files, resets stale claims, retries errored documents, and dispatches processing chains.
 - **Every 6 hours**: `sweep_stale_documents_task` resets documents stuck in `parsing`, `chunking`, or `embedding` for longer than `INGESTION_CLAIM_TIMEOUT_MINUTES`.
 
 ## Flow diagram
@@ -56,7 +56,7 @@ last_error           -- last exception message
 flowchart TB
     subgraph Sources
         A[API upload]
-        B[input/raw/ folder]
+        B[data/input/raw/ folder]
     end
 
     A -->|save raw file| C[Register document row<br/>stage: registered]
@@ -87,7 +87,7 @@ flowchart TB
 sequenceDiagram
     participant Client
     participant API as /upload
-    participant Raw as input/raw/
+    participant Raw as data/input/raw/
     participant DB as documents table
     participant Redis as Celery broker
     participant Upload as upload queue worker
@@ -119,7 +119,7 @@ Because each stage writes its artifact, a failed document can resume from the la
 ## Environment variables
 
 ```env
-INPUT_RAW_DIR=input/raw
+INPUT_RAW_DIR=data/input/raw
 INGESTION_MAX_ATTEMPTS=2
 INGESTION_CLAIM_TIMEOUT_MINUTES=30
 DEFAULT_CHUNK_SIZE=512

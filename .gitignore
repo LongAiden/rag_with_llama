@@ -22,21 +22,11 @@ __pycache__/
 dist/
 build/
 
-# Temporary upload directories
-temp_uploads/
-uploads/*.pdf
-uploads/*.docx
-uploads/*.txt
-!uploads/.gitkeep
-
-# Input data
-input/
-
-# Derived pipeline artifacts (parsed markdown, chunk dumps) — regenerable
+# Derived pipeline artifacts (parsed markdown, chunk dumps, input, temp uploads) — regenerable
 data/
 
 # Test artifacts
-htmlcov/
+tests/htmlcov/
 .coverage
 .pytest_cache/
 .tox/

@@ -116,7 +116,7 @@ services:
       APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-}
 
       # Ingestion settings
-      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-data/input/raw}
       PARSED_DIR: ${PARSED_DIR:-data/parsed}
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
@@ -239,7 +239,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-data/input/raw}
       PARSED_DIR: ${PARSED_DIR:-data/parsed}
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
@@ -359,7 +359,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-data/input/raw}
       PARSED_DIR: ${PARSED_DIR:-data/parsed}
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
@@ -466,7 +466,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-input/raw}
+      INPUT_RAW_DIR: ${INPUT_RAW_DIR:-data/input/raw}
       PARSED_DIR: ${PARSED_DIR:-data/parsed}
       CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
       PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
@@ -640,7 +640,7 @@ services:
       # Mount tests directory for easier test development
       - ./tests:/app/tests
       # Mount htmlcov for coverage reports
-      - ./htmlcov:/app/htmlcov
+      - ./tests/htmlcov:/app/tests/htmlcov
     depends_on:
       postgres:
         condition: service_healthy

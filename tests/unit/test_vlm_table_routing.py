@@ -1,7 +1,7 @@
 """
 Unit tests for which extractor handles tables in `_process_page`.
 
-Measured on real crops from `input/raw/…_bert.pdf` with `qwen3.5:0.8b`:
+Measured on real crops from `data/input/raw/…_bert.pdf` with `qwen3.5:0.8b`:
 
 - Table 1 (GLUE results, 13 columns) came back with headers `I, II, III, IV…`
   and mangled values.

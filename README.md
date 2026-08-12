@@ -6,13 +6,13 @@ A Retrieval-Augmented Generation (RAG) system built with FastAPI, PostgreSQL + p
 
 ```
 Raw file  →  Status DB (documents)  →  Parse  →  Chunk  →  Embed  →  pgvector  →  Query + Rerank  →  LLM Answer (choose one)
-input/raw/   one row per file,           (parser)  (chunker) (vector)  (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
+data/input/raw/   one row per file,           (parser)  (chunker) (vector)  (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
              stage-based, claim & retry                                                             • DeepSeek-R1 8B    (Ollama /api/generate)
                                                                                                   • DeepSeek-R1 1.5B  (Ollama)
                                                                                                   • Llama 3.2 3B      (Ollama)
 ```
 
-1. **Upload / scan** - drop a file via the API or the weekly scan. The raw file is saved in `input/raw/` and a status row is inserted into the `documents` table (`stage = registered`).
+1. **Upload / scan** - drop a file via the API or the weekly scan. The raw file is saved in `data/input/raw/` and a status row is inserted into the `documents` table (`stage = registered`).
 2. **Parse** - a Celery worker claims the row, extracts text using the chosen backend (Docling + Ollama VLM, or Docling + Gemini Vision), and stores the parsed text in `document_parsed`.
 3. **Chunk** - the parsed text is split into chunks; the result is stored in `document_chunked`.
 4. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in the existing `chunks` pgvector table.
@@ -184,7 +184,7 @@ Upload and process a new document into the database.
    - **Access Password** - required only if `APP_ACCESS_PASSWORD` is set
    - **Table Name** - target table in the database (default: `document_chunks`)
    - **Chunk Size** - token size per chunk (default: 512)
-3. Click **📤 Upload & Process**. The file is saved to `input/raw/`, registered in the `documents` status table, and processed in the background by Celery. Track progress via `/documents/{document_id}/status`.
+3. Click **📤 Upload & Process**. The file is saved to `data/input/raw/`, registered in the `documents` status table, and processed in the background by Celery. Track progress via `/documents/{document_id}/status`.
 
 ### Navigation
 
@@ -247,7 +247,7 @@ docker compose --profile observability up -d langfuse
 **Upload a PDF:**
 ```bash
 curl -X POST "http://127.0.0.1:8000/upload" \
-  -F "file=@input/raw/llama2.pdf" \
+  -F "file=@data/input/raw/llama2.pdf" \
   -F "chunk_size=512" \
   -F "table_name=documents"
 ```
@@ -334,10 +334,9 @@ rag_with_llama/
 │       └── telemetry/            # LLM interaction logger
 │           └── llm_logger.py
 │
-├── input/                        # Runtime input (gitignored)
-│   └── raw/                      # Original files from API uploads / weekly scan
-│
-├── data/                         # Derived pipeline artifacts (gitignored)
+├── data/                         # Runtime data (gitignored)
+│   ├── input/                    # Original files from API uploads / weekly scan
+│   │   └── raw/
 │   ├── parsed/                   # <document_id>_<name>.md from the parse stage
 │   └── chunks/                   # One folder per document from the chunk stage
 │       └── <document_id>_<name>/
@@ -414,7 +413,7 @@ Copy `.env.example` to `.env` and set these values:
 | `OLLAMA_MODEL` | No | `deepseek-r1:1.5b` | Text model for RAG Q&A (runs locally via Ollama) |
 | `OLLAMA_VLM_MODEL` | No | `qwen3.5:0.8b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
-| `INPUT_RAW_DIR` | No | `input/raw` | Directory for raw uploaded / scanned files |
+| `INPUT_RAW_DIR` | No | `data/input/raw` | Directory for raw uploaded / scanned files |
 | `INGESTION_MAX_ATTEMPTS` | No | `2` | Max retries before marking a document `failed` |
 | `INGESTION_CLAIM_TIMEOUT_MINUTES` | No | `30` | Reset a worker claim after this many minutes |
 | `DEFAULT_CHUNK_SIZE` | No | `512` | Default chunk size for ingestion |
