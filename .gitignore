@@ -25,6 +25,10 @@ build/
 # Derived pipeline artifacts (parsed markdown, chunk dumps, input, temp uploads) — regenerable
 data/
 
+# Docker container logs
+logs/
+!logs/.gitkeep
+
 # Test artifacts
 tests/htmlcov/
 .coverage

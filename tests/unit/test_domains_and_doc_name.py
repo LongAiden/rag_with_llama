@@ -81,7 +81,7 @@ class TestReservedTableNames:
 
     @pytest.mark.parametrize("name", [
         "domains", "documents", "document_parsed", "document_chunked",
-        "llm_interactions", "entities", "relationships",
+        "llm_interactions", "entities", "relationships", "schema_migrations",
     ])
     def test_application_tables_are_rejected(self, name):
         with pytest.raises(ValueError, match="Reserved table name"):

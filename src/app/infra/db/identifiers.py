@@ -15,7 +15,7 @@ _SAFE_TABLE_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]{0,62}$')
 _SYSTEM_TABLES = frozenset([
     'entities', 'relationships', 'entity_nodes', 'entity_edges',
     'domains', 'documents', 'document_parsed', 'document_chunked',
-    'llm_interactions',
+    'llm_interactions', 'schema_migrations',
 ])
 
 

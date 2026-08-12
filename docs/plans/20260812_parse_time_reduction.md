@@ -224,21 +224,23 @@ Only if Step 0 showed the out-of-band cost is material. On `celery_worker_upload
 documents, so watch `peak_rss` in the summary line across four consecutive documents before
 keeping the change. Revert on any upward trend — an OOM-killed worker costs more than 60s.
 
-### Step 4 — Cheap config experiment: threads 4 → 6
+### Step 4 — Cheap config experiment: threads 4 → 6 — **APPLIED 2026-08-12, unmeasured**
 
-The VM has 6 CPUs; the worker is capped at 4.0 and docling is told to use 4 threads. Raise
-both on `celery_worker_upload` only:
+The VM has 6 CPUs; the workers were capped at 4.0 and docling was told to use 4 threads.
+Both raised to 6 on `celery_worker_upload` and `celery_worker_ingestion` (same image, same
+pipeline), in the same pass that deduplicated the compose env blocks into YAML anchors:
 
-- [docker-compose.yml:237](docker-compose.yml#L237) `cpus: "4.0"` → `"6.0"`
-- [:291](docker-compose.yml#L291) `DOCLING_NUM_THREADS: 4` → `6`
+- `celery_worker_upload` / `celery_worker_ingestion` `limits.cpus` `"4.0"` → `"6.0"`
+- `x-common-env` `DOCLING_NUM_THREADS` `4` → `6` (shared by app, both workers, beat)
 
 Expect a *sub*-linear gain: threads 5 and 6 land on efficiency cores, which are materially
 slower, and Ollama shares the host. Measure `Converted pages … rate=Xs/page` on the same
 document and page range — F12's lesson is that document complexity alone produces a 4×
 difference, so cross-document comparisons are meaningless.
 
-Keep if it wins; revert if it does not. Do not apply it to `celery_worker_ingestion` — that
-worker does not run docling.
+**This is applied but not yet measured.** Revert both to 4 if the rate does not improve.
+Watch `peak_rss` on the summary line too: more concurrent work in flight is precisely what
+consumed the headroom the last time docling throughput went up.
 
 ### Step 5 — Overlap VLM wait with the next batch's convert (code)
 
