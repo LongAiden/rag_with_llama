@@ -246,7 +246,7 @@ When a table is deleted (`DELETE /table/{name}`), `forget_pipeline()` evicts the
 |---|---|---|
 | `IngestionRepository` | `src/app/infra/db/ingestion_repository.py` | `documents`, `document_parsed`, `document_chunked` CRUD, claims, retries, status |
 | `TableRepository` | `src/app/infra/db/table_repository.py` | List/count chunk tables, drop tables, per-table stats |
-| `DomainRepository` | `src/app/infra/db/domain_repository.py` | `domains` registry CRUD, documents per domain, name→id resolution. `list_domains()` also registers chunk tables that have no registry row |
+| `DomainRepository` | `src/app/infra/db/domain_repository.py` | `domains` registry CRUD, documents per domain, name→id resolution. `list_domains(reconcile=True)` also registers chunk tables that have no registry row |
 | `VectorStore` | `src/app/ingestion/embedding/vector_store.py` | Per-table chunk CRUD, similarity search, BM25, delete by document |
 
 ### 6.3 Safe identifiers
@@ -393,13 +393,18 @@ Previously, routes were declared twice and only the wrapper versions were mounte
 
 ### 10.3 Pre-existing test failures
 
-Running `tests/unit` locally gives 12 failures, all pre-existing and unrelated to the layout move:
+Running `tests/unit` on `refactor/document-ingestion` gives **9 failures / 589
+passed** (re-counted 2026-08-12), all pre-existing and unrelated to current work:
 
 - `tests/unit/test_chunker_factory.py` (5, chonkie API drift — the local chonkie is newer than the pinned one)
-- `tests/unit/test_delete_table_security.py` (6, MagicMock/jsonable_encoder issue)
+- `tests/unit/test_pdf_parser_factory.py` (2, still asserts `min_image_short_px`, which the parser refactor renamed to `min_image_short_pt` and joined with `images_scale`/`tableformer_mode`)
+- `tests/unit/test_delete_table_security.py` (1, `test_path_traversal_blocked` — MagicMock/jsonable_encoder issue)
 - `tests/unit/test_llm_provider.py` (1, `test_generate_content_retries_on_error` — this file was archived with the graph feature and never ran until it was restored to `tests/unit/`)
 
-On `refactor/document-ingestion` there are 2 more (14 total): `tests/unit/test_pdf_parser_factory.py` still asserts `min_image_short_px`, which the parser refactor renamed to `min_image_short_pt` and joined with `images_scale`/`tableformer_mode`.
+This section previously claimed 12 on master and 14 on this branch. The
+`test_delete_table_security.py` count in particular has drifted — 5 of its 6
+documented failures now pass. Nobody recorded which change fixed them, so treat
+the list above as the current baseline rather than a history.
 
 ### 10.4 UI / template debt
 
@@ -781,6 +786,120 @@ What landed:
 
 27 unit tests in `tests/unit/test_f23_structure_preservation.py`. All string work —
 no expected change to parse time or peak RSS.
+
+### 15.11 VLM/convert pipelining (2026-08-12)
+
+Plan: `docs/plans/20260812_parse_speed_and_embed_refresh.md` (Part A); design:
+`docs/plans/20260812_parse_pipelining.md`.
+
+The parse stage's two phases never overlapped. On the 504-page NLTK.pdf: docling
+`convert()` 749s (72%), VLM wait 281s (27%), non-VLM assembly ~5s. During the
+749s of convert, Ollama is idle; during the 281s of VLM decode, the container's
+threads are idle.
+
+`_process_page` is now split, and the join is deferred by one batch:
+
+```
+before:  convert(N) → assemble(N) [VLM blocks] → release → convert(N+1) → …
+after:   convert(N) → build(N) → release → convert(N+1) → emit(N) → build(N+1) → …
+```
+
+- **`_build_page`** — the item walk. Submits VLM futures and returns
+  `(ordered, vlm_tasks)` without joining. Everything that reads `doc` happens
+  here: crops are cut eagerly into independent PIL images and `ordered` holds
+  only strings, so the returned payload carries no `DoclingDocument` reference.
+- **`_finalize_page`** — joins the futures, wraps figures/tables, sorts, returns
+  the `[PAGE:n]` block.
+- **`_process_page`** — kept as a thin wrapper over both, so the synchronous
+  `executor=None` path and its callers are unchanged.
+- **`_emit_batch`** — runs `_finalize_page` plus the existing per-page
+  normalization for one built batch, appends to `pages_md` and streams to
+  `out_file`.
+
+Invariants: `del doc, page_items` still happens before the emit, so only one
+`DoclingDocument` is ever alive; pages come out in order, with `out_file`
+streaming one batch behind; build and finalize have separate per-page
+`try/except` so one bad page cannot take the batch down. The final batch's emit
+stays *inside* the `with ThreadPoolExecutor` block — outside it, `shutdown(wait=True)`
+would do the same waiting first with the log order scrambled.
+
+**Depth stays 1 deliberately.** Per batch (50 pages, 11 batches) convert is ~68s
+against ~26s of VLM, so one batch of lag already absorbs all of it; depth 2 would
+buy nothing and hold a second batch of crops in RAM. The pipeline is
+docling-bound and stays that way. The irreducible serial cost is the last batch's
+VLM tail, which has no convert left to hide under.
+
+**New metric `vlm_blocked`** in the `parse_pdf summary:` line. `vlm_wait`
+(`_vlm_seconds`) is unchanged — total time inside VLM calls on the pool threads,
+kept for historical comparability. `_vlm_blocked_seconds` is how much of that the
+assembly loop actually waited for, and is the number that proves the overlap:
+it collapsed from an implicit 281s to a **measured 0s**.
+
+The wait is timed **outside** `_vlm_stats_lock`. `_record_vlm_call` takes that
+same lock from the pool thread, so holding it across `future.result()` deadlocks
+two ways — the main thread waiting on a future whose thread waits on the main
+thread, and then a non-reentrant re-acquire. `TestFinalizePageJoin` pins this
+with daemon threads, a bare `Future` and timed waits, so the regression fails in
+5s instead of wedging the suite.
+
+#### Measured (2026-08-12, 504-page NLTK.pdf)
+
+Both runs are in `logs/celery_worker_upload.log` — baseline at 03:44:20, pipelined
+at 17:19:25, same document, same knobs (`DOCLING_PAGE_BATCH_SIZE=50`,
+`VLM_CONCURRENCY=1`).
+
+| metric | baseline | pipelined | delta |
+|---|---|---|---|
+| `total` | 1035s | **808s** | **−227s (−22%)** |
+| `assembly` | 286s (28%) | **3s (0%)** | −283s |
+| `docling` | 749s (72%) | 804s (99%) | **+55s (+7%)** |
+| `vlm_wait` | 281s | 333s | +52s |
+| `vlm_blocked` | — (implicitly 281s) | **0s** | full overlap |
+| `vlm_calls` / `vlm_failures` | 86 / 0 | 86 / 0 | unchanged |
+| `peak_rss` | 2886 MB | 3097 MB | +211 MB |
+
+**Output is byte-for-byte identical** — both artifacts md5
+`db1845905fcb30cfd10c568757fdae04`, 504 pages strictly ascending, 86 `<figure>`,
+67 `<table>`. That check is only this strong because `OLLAMA_VLM_TEMPERATURE=0.0`
+(§15.9) makes the VLM deterministic; without it only page ordering and figure
+placement would be comparable.
+
+**The saving is real but it came from a different place than predicted, and cost
+more than predicted.** `assembly` collapsing 286s → 3s is the whole win —
+`vlm_blocked=0` means every VLM call had resolved before its emit, so not even
+the final batch's tail was paid. But `docling` rose 55s, which the plan expected
+to stay flat. Per-batch convert times show a uniform tax rather than an outlier:
+batch 1 is *faster* (no prior batch's VLM work to overlap yet), the 4-page final
+batch is unchanged (no VLM calls), and every batch that genuinely overlaps pays
+4-9s. That shape is CPU contention. Ollama runs locally on this Mac and shares
+the machine (§15.8), so VLM decode now competes with docling instead of following
+it; `vlm_wait` rising 281→333s is the same effect seen from the other side.
+
+Net: trade 283s of serial VLM for 55s of slower convert. **On a host where Ollama
+is remote, the docling penalty should not appear at all** — the overlap would be
+pure gain. Conversely, raising `VLM_CONCURRENCY` on this host would deepen the
+contention, not relieve it.
+
+The parse is now **99% docling**. Every remaining second is in `convert()`, so
+further speedup has to come from docling itself (threads, accelerator, image
+scale) — no amount of VLM tuning will move `total` again.
+
+**Memory.** `peak_rss` 3097 MB against `celery_worker_upload`'s 3.5G limit is
+**86% utilised**, ~487 MB of headroom, down from ~700 MB at baseline. The +211 MB
+is the crop backlog: one batch's PIL crops now live across the next `convert()`.
+The run completed with no OOM and NLTK.pdf is the heaviest document tested, so
+this is recorded rather than acted on — but it is the number to watch if a larger
+PDF appears. A rise of ~1 GB would mean a `DoclingDocument` is being retained
+instead; `tests/unit/test_pdf_parser_streaming.py`'s weakref check guards that.
+
+**Out-of-band cost is 2.9s** (`Stage parse completed … in 810.9s` against
+`total=808s`) — torch re-import plus converter construction. The parse-time
+reduction plan gated "relax `--max-tasks-per-child=1`" on this exceeding 60s. At
+20× under, that option is ruled out rather than merely unmeasured.
+
+Also in this change: the Embed tab's Domain select gained the `↻` refresh button
+the Chat tab already had. `loadDomainList()` already repopulated both dropdowns,
+so it is markup only.
 
 ---
 

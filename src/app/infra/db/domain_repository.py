@@ -36,13 +36,21 @@ class DomainRepository:
             self._pool = await ConnectionPoolManager.get_pool(self.connection_string)
         return self._pool
 
-    async def list_domains(self, reconcile: bool = True) -> List[Dict[str, Any]]:
+    async def list_domains(self, reconcile: bool = False) -> List[Dict[str, Any]]:
         """List domains with their document counts.
 
         When `reconcile` is set, chunk tables that exist without a registry row are
         registered first. Tables can appear out of band — created directly by a
         pipeline before migration 006, or by hand — and a domain list that omitted
         them would hide data the /tables endpoint still shows.
+
+        Reconciliation is off by default: a domain that was deleted via
+        ``DELETE /domains/{name}`` drops its chunk table, but if the DROP failed
+        or a table was orphaned, reconciliation would re-register it as a new
+        domain on every list call — making deleted domains reappear.
+
+        Only domains whose chunk table actually exists are returned, so orphaned
+        registry rows (table dropped but domain row survived) do not appear.
         """
         pool = await self._get_pool()
         async with pool.acquire() as conn:
@@ -55,6 +63,11 @@ class DomainRepository:
                        COUNT(doc.id) AS document_count
                 FROM domains d
                 LEFT JOIN documents doc ON doc.domain = d.name
+                WHERE EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = d.table_name
+                )
                 GROUP BY d.name, d.display_name, d.description, d.table_name,
                          d.created_at, d.updated_at
                 ORDER BY d.display_name

@@ -383,7 +383,10 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             <input type="text" name="doc_name" placeholder="e.g. Linear Algebra (defaults to the file name)">
         </div>
         <div class="form-group">
-            <label>Domain</label>
+            <label style="display:flex;align-items:center;justify-content:space-between;">Domain
+                <button type="button" onclick="loadDomainList()" title="Refresh domain list"
+                        style="padding:4px 8px;font-size:13px;cursor:pointer;">↻</button>
+            </label>
             <select id="upload-domain" class="model-select" onchange="toggleNewDomain(this)">
                 <option value="__new__">➕ New domain…</option>
             </select>

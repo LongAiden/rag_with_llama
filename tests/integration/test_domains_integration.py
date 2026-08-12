@@ -306,5 +306,5 @@ class TestReconciliation:
             str(uuid.uuid4()), str(uuid.uuid4()), "some text",
         )
 
-        listed = await domain_repo.list_domains()
+        listed = await domain_repo.list_domains(reconcile=True)
         assert domain_name in {d["name"] for d in listed}

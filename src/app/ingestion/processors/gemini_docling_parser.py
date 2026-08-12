@@ -3,7 +3,7 @@ import time
 import logging
 import threading
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -461,6 +461,11 @@ class GeminiDoclingParser(PDFParserBase):
         self._vlm_calls: int = 0
         self._vlm_seconds: float = 0.0
         self._vlm_failures: int = 0
+        # `_vlm_seconds` is total time spent inside VLM calls on the pool threads;
+        # `_vlm_blocked_seconds` is how much of that the assembly loop actually
+        # waited for. Pipelining is meant to drive the second toward zero while
+        # leaving the first unchanged, so both are needed to see it worked.
+        self._vlm_blocked_seconds: float = 0.0
 
     def get_backend_name(self) -> str:
         return "gemini-docling"
@@ -646,7 +651,17 @@ class GeminiDoclingParser(PDFParserBase):
             return None
         return pil_full.crop((pix_l, pix_t, pix_r, pix_b))
 
-    def _process_page(self, page_no: int, items: list, doc, executor: Optional[ThreadPoolExecutor] = None) -> str:
+    def _build_page(
+        self, page_no: int, items: list, doc, executor: Optional[ThreadPoolExecutor] = None
+    ) -> tuple[list, list]:
+        """Walk one page's items, submitting VLM work without waiting for it.
+
+        Returns `(ordered, vlm_tasks)`. Everything that needs `doc` happens here —
+        crops are cut eagerly into independent PIL images and `ordered` holds only
+        strings — so the caller may `del doc` before handing these to
+        `_finalize_page`. That is what lets a batch's VLM calls run underneath the
+        next batch's `convert()`.
+        """
         from docling_core.types.doc import TableItem, PictureItem, TextItem, SectionHeaderItem
 
         page = doc.pages.get(page_no)
@@ -680,8 +695,8 @@ class GeminiDoclingParser(PDFParserBase):
                 pass
 
         ordered: list = []
-        vlm_tasks: list[tuple[int, int, int, any]] = []
-        
+        vlm_tasks: list[tuple[int, float, float, Future, str, str]] = []
+
         for item in items:
             if not item.prov:
                 continue
@@ -825,8 +840,17 @@ class GeminiDoclingParser(PDFParserBase):
             else:
                 continue
 
+        return ordered, vlm_tasks
+
+    def _finalize_page(self, page_no: int, ordered: list, vlm_tasks: list) -> str:
+        """Join `_build_page`'s VLM futures and render the page markdown."""
         if vlm_tasks:
             for col, y, x, future, kind, caption in vlm_tasks:
+                # Time the stall OUTSIDE the stats lock. `_record_vlm_call` takes
+                # that same lock from the pool thread, so holding it across
+                # `.result()` would have the main thread waiting on a future whose
+                # thread is waiting on the main thread — a hard hang.
+                blocked_started = time.monotonic()
                 try:
                     md = future.result().strip()
                     if kind == "table":
@@ -840,25 +864,83 @@ class GeminiDoclingParser(PDFParserBase):
                 except Exception as exc:
                     logger.error(f"VLM call failed: {exc}")
                     ordered.append((col, y, x, "[IMAGE]"))
+                finally:
+                    blocked = time.monotonic() - blocked_started
+                    with self._vlm_stats_lock:
+                        self._vlm_blocked_seconds += blocked
 
         ordered.sort(key=lambda t: (t[0], t[1], t[2]))
         body = "\n\n".join(md for _, _, _, md in ordered)
         return f"[PAGE:{page_no}]\n\n{body}"
 
+    def _process_page(self, page_no: int, items: list, doc, executor: Optional[ThreadPoolExecutor] = None) -> str:
+        """Build and finalize one page in a single call.
+
+        The synchronous path. `parse_pdf` pipelines the two halves instead, but
+        this stays the simple entry point for callers and tests.
+        """
+        ordered, vlm_tasks = self._build_page(page_no, items, doc, executor)
+        return self._finalize_page(page_no, ordered, vlm_tasks)
+
+    def _emit_batch(self, built: list, pages_md: list, out_file, total_pages: int) -> None:
+        """Finalize, normalize and write out one already-built batch.
+
+        `built` is `[(page_no, ordered, vlm_tasks), …]` from `_build_page`. It
+        holds no reference to a `DoclingDocument`, so the caller releases the doc
+        before calling this.
+        """
+        for page_no, ordered, vlm_tasks in built:
+            page_started = time.monotonic()
+            try:
+                page_md = self._finalize_page(page_no, ordered, vlm_tasks)
+                page_md = _normalize_tables_in_markdown(page_md)
+                page_md = _clean_html(page_md)
+                page_md = _fix_table_closing_tags(page_md)
+
+                chunk = page_md + "\n\n---\n\n"
+                pages_md.append(chunk)
+                if out_file:
+                    out_file.write(chunk)
+                    out_file.flush()
+            except Exception as exc:
+                logger.error(f"[page {page_no}] finalize failed: {exc}", exc_info=True)
+                continue
+
+            page_elapsed = time.monotonic() - page_started
+            if page_elapsed > 1.0:
+                with self._vlm_stats_lock:
+                    vlm_wait = self._vlm_seconds
+                    vlm_blocked = self._vlm_blocked_seconds
+                logger.info(
+                    f"[{page_no}/{total_pages}] elapsed={page_elapsed:.1f}s "
+                    f"vlm_wait={vlm_wait:.0f}s blocked={vlm_blocked:.0f}s"
+                )
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def parse_pdf(self, path: str | Path, output_path: Optional[str | Path] = None) -> str:
-        """Parse a PDF to markdown, one page batch at a time.
+        """Parse a PDF to markdown, one page batch at a time, VLM work pipelined.
 
-        Each batch is converted, assembled and released before the next
-        `convert()` runs, so peak memory is O(batch size) rather than
-        O(total pages): the `DoclingDocument`s — and the rendered page images
-        they carry — are never all alive at once.
+        Each batch is converted, built and released before the next `convert()`
+        runs, so peak memory is O(batch size) rather than O(total pages): the
+        `DoclingDocument`s — and the rendered page images they carry — are never
+        all alive at once.
+
+        The *join* of a batch's VLM futures is deferred by one batch, so those
+        calls decode while docling converts the next batch instead of after it:
+
+            convert(N) → build(N) → convert(N+1) → emit(N) → build(N+1) → …
+
+        Markdown still comes out in page order; streaming to `output_path` just
+        lags one batch behind. `vlm_blocked` in the summary is the metric that
+        shows the overlap working — it should be roughly one batch's VLM time,
+        not the whole run's.
         """
         with self._vlm_stats_lock:
             self._vlm_calls = 0
             self._vlm_seconds = 0.0
             self._vlm_failures = 0
+            self._vlm_blocked_seconds = 0.0
 
         pdf_path = str(path)
         name = Path(pdf_path).name
@@ -884,6 +966,12 @@ class GeminiDoclingParser(PDFParserBase):
         docling_seconds = 0.0
         assembly_seconds = 0.0
         peak_rss = _rss_mb()
+
+        # The batch whose VLM futures are in flight. Emitting it is deferred until
+        # after the NEXT convert() so the VLM decode overlaps docling's CPU work
+        # instead of following it. Depth stays 1: per batch, convert is ~68s
+        # against ~26s of VLM, so one batch of lag already absorbs all of it.
+        pending: Optional[list] = None
 
         try:
             with ThreadPoolExecutor(max_workers=self._vlm_concurrency) as executor:
@@ -912,44 +1000,50 @@ class GeminiDoclingParser(PDFParserBase):
                         f"rss={rss:.0f}MB"
                     )
 
+                    # Build this batch: walk the items and submit VLM work, but do
+                    # not join it. Everything that touches `doc` happens here.
                     assemble_started = time.monotonic()
+                    built: list = []
                     for page_no in range(batch_start, batch_end + 1):
-                        page_started = time.monotonic()
                         try:
-                            page_md = self._process_page(
+                            ordered, vlm_tasks = self._build_page(
                                 page_no=page_no,
                                 items=page_items.get(page_no, []),
                                 doc=doc,
                                 executor=executor,
                             )
-                            page_md = _normalize_tables_in_markdown(page_md)
-                            page_md = _clean_html(page_md)
-                            page_md = _fix_table_closing_tags(page_md)
-
-                            chunk = page_md + "\n\n---\n\n"
-                            pages_md.append(chunk)
-                            if out_file:
-                                out_file.write(chunk)
-                                out_file.flush()
+                            built.append((page_no, ordered, vlm_tasks))
                         except Exception as exc:
-                            logger.error(f"[page {page_no}] {exc}", exc_info=True)
+                            logger.error(f"[page {page_no}] build failed: {exc}", exc_info=True)
                             continue
-
-                        page_elapsed = time.monotonic() - page_started
-                        if page_elapsed > 1.0:
-                            with self._vlm_stats_lock:
-                                vlm_wait = self._vlm_seconds
-                            logger.info(
-                                f"[{page_no}/{total_pages}] elapsed={page_elapsed:.1f}s "
-                                f"vlm_wait={vlm_wait:.0f}s"
-                            )
                     assembly_seconds += time.monotonic() - assemble_started
 
                     # Release the batch before converting the next one. This is
                     # what keeps peak memory flat in total page count; dropping
-                    # it is what made a 504-page PDF OOM the worker.
+                    # it is what made a 504-page PDF OOM the worker. It must also
+                    # happen BEFORE the emit below, or two batches' docs overlap.
                     del doc, page_items
                     peak_rss = max(peak_rss, _rss_mb())
+
+                    # Emit the previous batch. Its futures resolved during the
+                    # convert() above, so these joins are nearly free.
+                    if pending is not None:
+                        emit_started = time.monotonic()
+                        self._emit_batch(pending, pages_md, out_file, total_pages)
+                        assembly_seconds += time.monotonic() - emit_started
+
+                    pending = built
+
+                # The final batch has no convert() left to hide under, so its VLM
+                # tail is the one unavoidable serial cost. Stay inside the `with`:
+                # outside it, the executor's shutdown(wait=True) would run first
+                # and do the same waiting with the log order scrambled.
+                if pending is not None:
+                    emit_started = time.monotonic()
+                    self._emit_batch(pending, pages_md, out_file, total_pages)
+                    assembly_seconds += time.monotonic() - emit_started
+                    pending = None
+                peak_rss = max(peak_rss, _rss_mb())
         finally:
             if out_file:
                 out_file.close()
@@ -961,6 +1055,7 @@ class GeminiDoclingParser(PDFParserBase):
             vlm_calls = self._vlm_calls
             vlm_seconds = self._vlm_seconds
             vlm_failures = self._vlm_failures
+            vlm_blocked = self._vlm_blocked_seconds
 
         def _pct(value: float) -> float:
             return (value / total_elapsed * 100) if total_elapsed else 0.0
@@ -969,7 +1064,8 @@ class GeminiDoclingParser(PDFParserBase):
             f"parse_pdf summary: {name} pages={total_pages} total={total_elapsed:.0f}s "
             f"docling={docling_seconds:.0f}s ({_pct(docling_seconds):.0f}%) "
             f"assembly={assembly_seconds:.0f}s ({_pct(assembly_seconds):.0f}%) "
-            f"vlm_wait={vlm_seconds:.0f}s vlm_calls={vlm_calls} "
+            f"vlm_wait={vlm_seconds:.0f}s vlm_blocked={vlm_blocked:.0f}s "
+            f"vlm_calls={vlm_calls} "
             f"vlm_failures={vlm_failures} peak_rss={peak_rss:.0f}MB"
         )
         if vlm_failures:
