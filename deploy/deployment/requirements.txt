@@ -1,0 +1,59 @@
+# Core ML Stack - Version Pinned for Stability
+numpy>=2.0.0,<3.0  # Updated for chonkie compatibility
+scipy>=1.10.0,<1.15.0
+# CPU wheels avoid downloading large CUDA artifacts during image builds
+# torchvision must be installed from PyTorch CPU index to match torch ABI
+torch>=2.3.1,<2.6.0
+torchvision>=0.18.0,<0.21.0
+sentence-transformers>=3.0.0  # Required by chonkie >=1.4.0
+huggingface-hub>=0.19.0,<1.0.0  # Pin compatible version
+
+# Vector Database & SQL
+pgvector>=0.3.0
+sqlalchemy[asyncio]>=2.0.0
+asyncpg
+
+# Document Processing Pipeline
+docling>=2.0.0  # Structured PDF parsing (tables, headings, layout)
+pypdf>=3.17.0
+python-docx>=1.0.0
+docx2txt>=0.8
+tiktoken>=0.5.2
+
+# Chunking Strategy
+chonkie>=1.4.0  # Latest stable version (1.4.2) with bug fixes
+flatbuffers>=23.5.26  # Required by chonkie's MongoDBHandshake at import time
+
+# LLM Integration
+google-generativeai>=0.8.0
+
+# ReRank
+rank_bm25
+
+# Graph & Knowledge Extraction
+spacy>=3.7.0  # For NER and entity extraction
+spacy-transformers>=1.3.0  # Transformer-based models for spacy
+networkx>=3.0  # For graph analysis and algorithms
+# Note: pgRouting is a PostgreSQL extension, not a Python package
+
+# Web Interface & API
+fastapi>=0.104.0
+pydantic>=2.5.0
+pydantic-settings>=2.0.0  # For configuration management
+pydantic-ai>=1.41.0
+pydantic-ai-slim[google]>=1.41.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+jinja2>=3.1.0
+
+# Environment Management
+python-dotenv>=1.0.0
+
+# Production Essentials (Add these)
+gunicorn>=21.2.0  # WSGI server for production
+logfire # For logging (status/errors only — tokens go to llm_interactions DB)
+langfuse>=2.7.0,<3.0.0  # Optional LLM-Ops UI — v2 API (observe decorator + langfuse_context)
+
+# Async task queue
+celery[redis]>=5.3.0
+redis>=5.0.0

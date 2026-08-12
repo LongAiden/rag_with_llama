@@ -5,18 +5,21 @@ A Retrieval-Augmented Generation (RAG) system built with FastAPI, PostgreSQL + p
 ## How It Works
 
 ```
-PDF file  →  Parser (choose one)       →  MarkdownChunker  →  pgvector  →  Query + Rerank  →  LLM Answer (choose one)
-input/pdf/   • PyMuPDF (default)          (chonkie)           (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
-             • Docling + Ollama VLM                                                             • DeepSeek-R1 8B    (Ollama /api/generate)
-             • Docling + Gemini Vision                                                          • DeepSeek-R1 1.5B  (Ollama)
-                                                                                                • Llama 3.2 3B      (Ollama)
+Raw file  →  Status DB (documents)  →  Parse  →  Chunk  →  Embed  →  pgvector  →  Query + Rerank  →  LLM Answer (choose one)
+data/input/raw/   one row per file,           (parser)  (chunker) (vector)  (PostgreSQL)   (BM25)            • Gemini 2.5 Flash  (google-generativeai SDK)
+             stage-based, claim & retry                                                             • DeepSeek-R1 8B    (Ollama /api/generate)
+                                                                                                  • DeepSeek-R1 1.5B  (Ollama)
+                                                                                                  • Llama 3.2 3B      (Ollama)
 ```
 
-1. **Upload a PDF** - choose a parsing backend: fast PyMuPDF (default), Docling + local Ollama VLM (`qwen2.5vl:7b`), or Docling + Gemini Vision. The result is stored as Markdown in `input/markdown/`
-2. **Chunk** - the Markdown is split into chunks using a structure-aware MarkdownChunker
-3. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in pgvector
-4. **Query** - a question triggers vector similarity search + BM25 reranking
-5. **Answer** - top chunks are passed to your chosen LLM: **Gemini 2.5 Flash** (cloud) or **DeepSeek-R1 8B** running locally via Ollama
+1. **Upload / scan** - drop a file via the API or the weekly scan. The raw file is saved in `data/input/raw/` and a status row is inserted into the `documents` table (`stage = registered`).
+2. **Parse** - a Celery worker claims the row, extracts text using the chosen backend (Docling + Ollama VLM, or Docling + Gemini Vision), and stores the parsed text in `document_parsed`.
+3. **Chunk** - the parsed text is split into chunks; the result is stored in `document_chunked`.
+4. **Embed** - each chunk is embedded with `all-MiniLM-L6-v2` and stored in the existing `chunks` pgvector table.
+5. **Query** - a question triggers vector similarity search + BM25 reranking.
+6. **Answer** - top chunks are passed to your chosen LLM: **Gemini 2.5 Flash** (cloud) or a **DeepSeek-R1 / Llama** model running locally via Ollama.
+
+The status DB is coordinated by three Celery queues: `upload` (single worker for API uploads), `ingestion` (scalable batch workers), and `rag` (existing RAG tasks). A weekly scan registers new files and retries errors; a stale-claim sweep resets tasks stuck longer than `INGESTION_CLAIM_TIMEOUT_MINUTES`.
 
 ---
 
@@ -44,10 +47,10 @@ dependencies and only needs to run once. Subsequent builds are fast.
 
 ```bash
 # Step 1 - build the base image (first time only, ~8–10 min)
-docker build -f deployment/Dockerfile.base -t rag-base:latest .
+docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
 
 # Step 2 - build and start all services (~1–2 min)
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 The app is ready when you see:
@@ -79,25 +82,69 @@ For running notebooks and scripts outside Docker, use **uv** (fast Python packag
 # Install uv (once)
 pip install uv
 
-# Install project + all dependencies into a virtualenv
-uv sync
+# Create a venv and install dependencies from deploy/deployment/requirements.txt
+uv venv
+uv pip install -r deploy/deployment/requirements.txt
 
 # Run a script with the project venv
 uv run python scripts/process_pdf.py
 
 # Or activate the venv manually
-.venv\Scripts\activate   # Windows
-source .venv/bin/activate  # macOS/Linux
+source .venv/bin/activate
 ```
 
-Dependencies are defined in `pyproject.toml`. The `test` extras include pytest, pytest-asyncio, and httpx:
+Dependencies are defined in `deploy/deployment/requirements.txt`. For testing, also install pytest:
 
 ```bash
-uv sync --extra test
-uv run pytest tests/unit -v
+uv pip install pytest pytest-asyncio httpx
+pytest tests/unit -v   # pytest.ini already puts src/ on the path
 ```
 
-> **GPU note:** `pyproject.toml` configures the CPU-only PyTorch index for faster installs. If you need CUDA, remove `extra-index-url` from `[tool.uv]` and install PyTorch manually.
+> **GPU note:** If you need CUDA, install PyTorch with the CUDA wheels instead of CPU-only.
+
+---
+
+## Testing
+
+Tests are designed to run inside Docker so dependencies and the PostgreSQL + pgvector extension are available.
+
+### Run all tests
+
+```bash
+docker compose --profile test run --rm test
+```
+
+### Run only unit tests (no database required)
+
+```bash
+docker compose --profile test run --rm test pytest tests/unit -v
+```
+
+### Run only integration tests (requires PostgreSQL)
+
+```bash
+docker compose --profile test run --rm test pytest tests/integration -v
+```
+
+### Run a specific test file
+
+```bash
+docker compose --profile test run --rm test pytest tests/unit/test_llm_provider.py -v
+```
+
+### Run with coverage
+
+```bash
+docker compose --profile test run --rm test pytest --cov=app --cov-report=html --cov-report=term
+```
+
+### Test markers
+
+- `unit` — no external services (mocked LLM, DB, embedding model)
+- `integration` — requires PostgreSQL running
+- `slow` — intentionally skipped with `pytest -m "not slow"`
+
+The `tests/` directory is mounted as a volume in the test container, so you can edit tests locally and re-run without rebuilding the image.
 
 ---
 
@@ -133,11 +180,11 @@ Upload and process a new document into the database.
 1. Click **📤 Embed**.
 2. Fill in the form:
    - **Document File** - select a PDF, DOCX, or TXT file
-   - **PDF Parsing Backend** - `Default (PyMuPDF only)` for speed; `Gemini Vision (docling)` or `Ollama VLM (docling)` for richer extraction of images and complex tables
+   - **PDF Parsing Backend** - `Local LLM (Ollama)` for local VLM extraction, or `Gemini Vision (docling)` for cloud-based extraction of images and complex tables
    - **Access Password** - required only if `APP_ACCESS_PASSWORD` is set
    - **Table Name** - target table in the database (default: `document_chunks`)
    - **Chunk Size** - token size per chunk (default: 512)
-3. Click **📤 Upload & Process**. Processing runs as a background task via Celery.
+3. Click **📤 Upload & Process**. The file is saved to `data/input/raw/`, registered in the `documents` status table, and processed in the background by Celery. Track progress via `/documents/{document_id}/status`.
 
 ### Navigation
 
@@ -160,13 +207,21 @@ docker compose down
 | `app` | 8000 | FastAPI application |
 | `postgres` | 5432 | PostgreSQL + pgvector |
 | `redis` | 6379 | Celery broker |
-| `celery_worker` | - | Background task worker |
+| `celery_worker_rag` | - | RAG / extraction tasks |
+| `celery_worker_upload` | - | API upload pipeline (single worker) |
+| `celery_worker_ingestion` | - | Batch ingestion pipeline (scale to 2 workers) |
+| `celery_beat` | - | Celery scheduler (weekly scan, stale sweep) |
+| `langfuse` | 3000 | LLM observability UI *(observability profile only)* |
 | `pgadmin` | 5050 | DB admin UI *(dev profile only)* |
 
 ```bash
 # Start pgAdmin (optional database UI)
 docker compose --profile dev up -d pgadmin
 # Then open http://127.0.0.1:5050
+
+# Start Langfuse (optional LLM observability UI)
+docker compose --profile observability up -d langfuse
+# Then open http://127.0.0.1:3000
 ```
 
 ---
@@ -176,7 +231,8 @@ docker compose --profile dev up -d pgadmin
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
-| `POST` | `/upload` | Upload and process a document |
+| `POST` | `/upload` | Upload and process a document (returns queued status + document_id) |
+| `GET` | `/documents/{document_id}/status` | Check ingestion status and stage history |
 | `POST` | `/query` | Ask a question, get a RAG answer |
 | `GET` | `/tables` | List all chunk tables |
 | `GET` | `/tables/count` | Count chunk tables in the database |
@@ -191,7 +247,7 @@ docker compose --profile dev up -d pgadmin
 **Upload a PDF:**
 ```bash
 curl -X POST "http://127.0.0.1:8000/upload" \
-  -F "file=@input/pdf/llama2.pdf" \
+  -F "file=@data/input/raw/llama2.pdf" \
   -F "chunk_size=512" \
   -F "table_name=documents"
 ```
@@ -210,71 +266,136 @@ curl -X POST "http://127.0.0.1:8000/query" \
 ```
 rag_with_llama/
 │
-├── input/                        # Runtime I/O
-│   ├── pdf/                      # Drop PDFs here (e.g. llama2.pdf)
-│   └── markdown/                 # Auto-generated Markdown output
+├── src/app/                      # All application code, one importable root
+│   │
+│   ├── ingestion/                # Document ingestion pipeline
+│   │   ├── artifacts.py          # Writes data/parsed + data/chunks dumps
+│   │   ├── processors/           # Parser per file type + Docling/Ollama/Gemini backends
+│   │   │   ├── processor_factory.py  # Picks processor by file type
+│   │   │   ├── pdf_parser_factory.py # Picks PDF backend (Ollama VLM vs Gemini)
+│   │   │   ├── docx_processor.py
+│   │   │   └── txt_processor.py
+│   │   ├── chunking/
+│   │   │   └── chunker_factory.py    # token / recursive / markdown / semantic
+│   │   ├── embedding/            # Split by responsibility
+│   │   │   ├── chunk.py           # Chunk dataclass
+│   │   │   ├── generator.py       # EmbeddingGenerator (SentenceTransformer)
+│   │   │   ├── vector_store.py    # VectorStore (pgvector data access)
+│   │   │   └── pipeline.py        # ChunkEmbeddingPipeline (orchestration)
+│   │   ├── extraction/           # Entity extraction flow (graph feature, unwired)
+│   │   ├── text_cleaning/
+│   │   │   └── cleaners.py
+│   │   └── validation/
+│   │       └── file_validator.py
+│   │
+│   ├── retrieval/
+│   │   ├── search.py             # Vector search → BM25 rerank → LLM
+│   │   ├── llm_operations.py     # LLM answer generation (Gemini or Ollama)
+│   │   ├── reranking.py          # Cross-encoder reranker
+│   │   └── utils.py              # BM25 scorer, RRF merge
+│   │
+│   ├── api/
+│   │   ├── app.py                # FastAPI app, route registration
+│   │   ├── validators.py
+│   │   ├── renderer.py           # Jinja2 template renderer
+│   │   ├── templates/            # HTML templates (Jinja2, autoescaped)
+│   │   └── routes/
+│   │       ├── document_routes.py    # Upload, status, delete document
+│   │       ├── query_routes.py       # Home page, query / query-form
+│   │       ├── table_routes.py       # List / count / delete tables
+│   │       ├── admin_routes.py       # Stats, health check
+│   │       ├── observability_routes.py  # LLM interaction stats/history
+│   │       └── graph_routes.py       # Graph feature — NOT mounted
+│   │
+│   ├── graph/                    # Knowledge graph feature (unwired, see below)
+│   │   ├── entity_extraction.py
+│   │   ├── relationship_extraction.py
+│   │   ├── graph_service.py
+│   │   └── {gemini,ollama}_provider.py
+│   │
+│   ├── config/
+│   │   ├── app_config.py         # AppConfig, AppSettings, DatabaseConfig
+│   │   └── graph_config.py       # GraphConfig (graph feature)
+│   │
+│   ├── models/
+│   │   ├── schemas.py            # Pydantic request/response models
+│   │   └── graph_models.py       # Graph feature schemas
+│   │
+│   ├── worker/
+│   │   ├── celery_app.py
+│   │   └── ingestion_tasks.py    # Stage-based parse / chunk / embed tasks
+│   │
+│   └── infra/                    # Shared plumbing (used by 2+ layers)
+│       ├── db/                   # Connection pool, repositories, identifiers
+│       │   ├── pool.py
+│       │   ├── identifiers.py    # validate_table_name, quote_ident
+│       │   ├── table_repository.py
+│       │   └── ingestion_repository.py
+│       └── telemetry/            # LLM interaction logger
+│           └── llm_logger.py
 │
-├── ingestion/                    # Document ingestion pipeline
-│   ├── processors/
-│   │   ├── pdf_to_markdown.py    # PDFToMarkdownConverter (PDF → Markdown)
-│   │   ├── pdf_processor.py      # Raw text extraction fallback
-│   │   ├── docx_processor.py
-│   │   ├── txt_processor.py
-│   │   └── processor_factory.py  # Picks processor by file type
-│   ├── chunking/
-│   │   └── chunker_factory.py    # token / recursive / markdown / semantic
-│   ├── embedding/
-│   │   └── vector_store.py       # ChunkEmbeddingPipeline + pgvector
-│   ├── text_cleaning/
-│   │   └── cleaners.py
-│   └── validation/
-│       └── file_validator.py
-│
-├── retrieval/
-│   ├── search.py                 # Vector search → BM25 rerank → LLM
-│   ├── llm_operations.py         # LLM answer generation (Gemini or Ollama)
-│   └── utils.py                  # BM25 scorer
-│
-├── api/
-│   ├── app.py                    # FastAPI app, route registration
-│   ├── config.py                 # Re-export shim (config lives in config/)
-│   ├── validators.py
-│   ├── templates.py              # Inline HTML templates
-│   └── routes/
-│       └── document_routes.py    # All active endpoints
-│
-├── config/
-│   └── app_config.py             # AppConfig, AppSettings, DatabaseConfig
-│
-├── models/
-│   └── models.py                 # Pydantic request/response models
-│
-├── worker/
-│   ├── celery_app.py
-│   └── tasks.py                  # Async upload task
-│
-├── graph_processing/             # Knowledge graph - DISABLED (code preserved)
+├── data/                         # Runtime data (gitignored)
+│   ├── input/                    # Original files from API uploads / weekly scan
+│   │   └── raw/
+│   ├── parsed/                   # <document_id>_<name>.md from the parse stage
+│   └── chunks/                   # One folder per document from the chunk stage
+│       └── <document_id>_<name>/
+│           ├── 0000.md           # One file per chunk
+│           └── index.json        # Per-chunk metadata
 │
 ├── tests/
 │   ├── unit/                     # No DB required
 │   └── integration/              # Requires running postgres
 │
-├── docs/                         # Developer documentation
-│   ├── CHUNKING_STRATEGIES.md
-│   ├── PROJECT_ARCHITECTURE_SUMMARY.md
-│   └── TESTING.md
+├── deploy/
+│   ├── deployment/
+│   │   ├── Dockerfile            # App image (uses Dockerfile.base)
+│   │   ├── Dockerfile.base       # Heavy ML deps (build once)
+│   │   ├── Dockerfile.postgres   # Postgres + pgvector
+│   │   ├── Dockerfile.test       # Test runner
+│   │   ├── requirements.txt
+│   │   └── Makefile              # Test + dev shortcuts
+│   └── migrations/
+│       ├── optional/            # Not applied by initdb (graph schema)
+│       ├── 002_create_llm_interactions.sql
+│       ├── 003_create_ingestion_status.sql
+│       ├── 004_ingestion_fixes.sql
+│       └── 005_drop_filename_dedupe.sql
 │
-├── deployment/
-│   ├── Dockerfile                # App image (uses Dockerfile.base)
-│   ├── Dockerfile.base           # Heavy ML deps (build once)
-│   ├── Dockerfile.postgres       # Postgres + pgvector
-│   ├── Dockerfile.test           # Test runner
-│   ├── requirements.txt
-│   └── Makefile                  # Test + dev shortcuts
+├── docs/                         # Developer documentation & images
+│   ├── ARCHITECTURE.md           # Read this first
+│   ├── images/                   # Screenshots and README assets
+│   └── archive/                  # Historical refactoring notes
 │
+├── experiments/                  # Scratch notebooks, kept as reference only
 ├── docker-compose.yml
+├── pytest.ini
 └── .env.example
 ```
+
+Everything under `src/app/` imports as `app.*` — `from app.ingestion.embedding.pipeline import ChunkEmbeddingPipeline`. `pytest.ini` puts `src/` on the path locally; the Docker images set `PYTHONPATH=/app/src`.
+
+### Ingestion artifacts
+
+The parse and chunk stages each dump their output under `data/` so it can be read
+directly instead of queried out of JSONB. Postgres (`document_parsed`,
+`document_chunked`) stays the source of truth; `data/` is regenerable and
+gitignored. Set `PERSIST_INGESTION_ARTIFACTS=false` to turn the dumps off, or
+point `PARSED_DIR` / `CHUNKS_DIR` elsewhere. A failed artifact write is logged
+and skipped — it never fails the ingestion.
+
+### Knowledge graph
+
+The knowledge-graph feature (entity/relationship extraction) lives in
+`src/app/graph/` with its config, models, extraction flow, and routes. It is
+**not part of the workflow**: no `/graph` endpoint is served, no live module
+imports it, its schema sits in `deploy/migrations/optional/` where Postgres'
+initdb ignores it, and its settings are absent from `docker-compose.yml` and
+`.env.example`. `tests/unit/test_graph_not_wired.py` keeps it that way.
+
+To enable it: mount `graph_routes.router`, apply
+`deploy/migrations/optional/001_create_graph_tables.sql`, restore the settings
+in `src/app/config/graph_config.py`, and delete that test file.
 
 ---
 
@@ -289,9 +410,14 @@ Copy `.env.example` to `.env` and set these values:
 | `POSTGRES_DB` | No | `rag_db` | Database name |
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model for Q&A |
 | `OLLAMA_BASE_URL` | No | `http://host.docker.internal:11434` | Ollama endpoint (Docker uses host network) |
-| `OLLAMA_MODEL` | No | `deepseek-r1:8b` | Text model for RAG Q&A (runs locally via Ollama) |
-| `OLLAMA_VLM_MODEL` | No | `qwen3.5:9b` | VLM model for PDF image/table extraction (multimodal) |
+| `OLLAMA_MODEL` | No | `deepseek-r1:1.5b` | Text model for RAG Q&A (runs locally via Ollama) |
+| `OLLAMA_VLM_MODEL` | No | `qwen3.5:0.8b` | VLM model for PDF image/table extraction (multimodal) |
 | `CHUNKER_TYPE` | No | `markdown` | `markdown` / `recursive` / `token` / `semantic` |
+| `INPUT_RAW_DIR` | No | `data/input/raw` | Directory for raw uploaded / scanned files |
+| `INGESTION_MAX_ATTEMPTS` | No | `2` | Max retries before marking a document `failed` |
+| `INGESTION_CLAIM_TIMEOUT_MINUTES` | No | `30` | Reset a worker claim after this many minutes |
+| `DEFAULT_CHUNK_SIZE` | No | `512` | Default chunk size for ingestion |
+| `DEFAULT_PARSE_BACKEND` | No | `ollama` | Default parsing backend for the ingestion pipeline |
 | `APP_ACCESS_PASSWORD` | No | *(disabled)* | Password-protect the web UI |
 | `LOGFIRE_WRITE_TOKEN` | No | - | [Logfire](https://logfire.pydantic.dev/) monitoring |
 
@@ -309,7 +435,7 @@ GeminiBackend  →  genai.GenerativeModel(model).generate_content(prompt)  →  
 OllamaBackend  →  POST OLLAMA_BASE_URL/api/generate  →  Ollama (runs on Windows host)
 ```
 
-- `OLLAMA_MODEL` - the text model used to answer RAG questions (e.g. `deepseek-r1:8b`)
+- `OLLAMA_MODEL` - the text model used to answer RAG questions (e.g. `deepseek-r1:1.5b`)
 - `OLLAMA_VLM_MODEL` - the vision model used to describe images and complex tables during PDF parsing (Docling + Ollama backend only)
 
 No API key or internet connection is required for Ollama models. `GOOGLE_API_KEY` is only needed when using a Gemini model.
@@ -318,19 +444,19 @@ No API key or internet connection is required for Ollama models. `GOOGLE_API_KEY
 
 ## Running Tests
 
-The Makefile is in `deployment/`. Use it with:
+The Makefile is in `deploy/deployment/`. Use it with:
 
 ```bash
-make -f deployment/Makefile <target>
+make -f deploy/deployment/Makefile <target>
 ```
 
 | Command | Description |
 |---------|-------------|
-| `make -f deployment/Makefile test-unit` | Unit tests locally (no DB) |
-| `make -f deployment/Makefile test-integration` | Integration tests locally |
-| `make -f deployment/Makefile test-docker-unit` | Unit tests in Docker |
-| `make -f deployment/Makefile test-docker` | All tests in Docker |
-| `make -f deployment/Makefile coverage` | HTML coverage report |
+| `make -f deploy/deployment/Makefile test-unit` | Unit tests locally (no DB) |
+| `make -f deploy/deployment/Makefile test-integration` | Integration tests locally |
+| `make -f deploy/deployment/Makefile test-docker-unit` | Unit tests in Docker |
+| `make -f deploy/deployment/Makefile test-docker` | All tests in Docker |
+| `make -f deploy/deployment/Makefile coverage` | HTML coverage report |
 
 Or run pytest directly:
 ```bash
@@ -344,31 +470,31 @@ pytest tests/integration -v    # requires running postgres
 
 **Home screen (idle - no chat session yet):**
 
-<img src="./images/home_screen.png" alt="Home Screen" width="600">
+<img src="./docs/images/home_screen.png" alt="Home Screen" width="600">
 
-<img src="./images/chat_session_idle.png" alt="Chat Tab Idle" width="600">
+<img src="./docs/images/chat_session_idle.png" alt="Chat Tab Idle" width="600">
 
 **Chat session - query + results:**
 
-<img src="./images/chat_session.png" alt="Chat Session with Results" width="600">
+<img src="./docs/images/chat_session.png" alt="Chat Session with Results" width="600">
 
 **Swagger UI (interactive API docs):**
 
-<img src="./images/fastapi.png" alt="FastAPI Swagger UI" width="600">
+<img src="./docs/images/fastapi.png" alt="FastAPI Swagger UI" width="600">
 
 **Health check:**
 
-<img src="./images/system_health_check.png" alt="System Health Check" width="600">
+<img src="./docs/images/system_health_check.png" alt="System Health Check" width="600">
 
 **Database statistics:**
 
-<img src="./images/database_statistic.png" alt="Database Statistics" width="600">
+<img src="./docs/images/database_statistic.png" alt="Database Statistics" width="600">
 
 **Logfire monitoring:**
 
-<img src="./images/logfire_example.png" alt="Logfire" width="600">
+<img src="./docs/images/logfire_example.png" alt="Logfire" width="600">
 
-<img src="./images/llm_request_logs.png" alt="LLM Request Logs" width="600">
+<img src="./docs/images/llm_request_logs.png" alt="LLM Request Logs" width="600">
 
 ---
 
@@ -376,10 +502,10 @@ pytest tests/integration -v    # requires running postgres
 
 ```bash
 # Code changes only (fast, ~30 seconds)
-docker compose restart app celery_worker
+docker compose restart app celery_worker_rag celery_worker_upload celery_worker_ingestion celery_beat
 
 # Dependency changes (slower, ~1–2 min)
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 ---
@@ -401,15 +527,15 @@ docker compose logs postgres
 **Reset the database (deletes all data):**
 ```bash
 docker compose down -v
-docker compose up --build
+docker compose --profile observability up --build
 ```
 
 **Full clean rebuild:**
 ```bash
 docker compose down -v
 docker system prune -a
-docker build -f deployment/Dockerfile.base -t rag-base:latest .
-docker compose up --build
+docker build -f deploy/deployment/Dockerfile.base -t rag-base:latest .
+docker compose --profile observability up --build
 ```
 
 **Chunk insertion fails with `asyncpg DataError: expected str, got dict` or `expected str, got list`:**
@@ -438,6 +564,28 @@ docker exec rag_postgres psql -U admin -d rag_db -c "\dt"
 docker exec -it rag_redis redis-cli
 ```
 
+**Inspect ingestion status:**
+```bash
+# Load env vars so psql uses the right DB credentials
+set -a && source .env && set +a
+
+# Recent documents and their stages
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, claimed_at, last_error FROM documents ORDER BY created_at DESC LIMIT 10;"
+
+# Documents stuck in a processing stage (likely OOM-killed worker)
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, claimed_at FROM documents WHERE stage IN ('parsing','chunking','embedding');"
+
+# Failed / error documents
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, file_name, stage, attempts, last_error FROM documents WHERE stage IN ('error','failed');"
+
+# Reset a stuck document back to the start
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "UPDATE documents SET stage = 'registered', claimed_at = NULL, claimed_by = NULL, attempts = 0 WHERE id = 'YOUR_DOCUMENT_ID';"
+```
+
 ## Known Limitations
 
 **Retrieval**
@@ -449,8 +597,24 @@ docker exec -it rag_redis redis-cli
 
 ---
 
+## Roadmap
+
+Planned for upcoming phases:
+
+**Conversation memory**
+Today each `/query` call is stateless — `session_id` only tags the Langfuse trace, no chat history is carried between turns. Next phase adds session-scoped conversation memory (likely Redis-backed, keyed by `session_id`) so follow-up questions can reference prior turns in the same session. A message/token cap per session bounds prompt size and cost, with oldest turns evicted or summarized once the limit is hit.
+
+**LangGraph conversation routing**
+Introduce a LangGraph graph in front of `retrieval/search.py` to route each incoming message — e.g. distinguish a new question (run full retrieval) from a follow-up (reuse prior context), a greeting/small talk (skip retrieval), or an out-of-scope request (short-circuit to a fallback response) — instead of always running the same vector search → rerank → LLM path.
+
+**Guardrails**
+Add input/output guardrails around the LLM call in `retrieval/llm_operations.py`: input-side checks (prompt injection, off-topic/abuse filtering) and output-side checks (PII leakage, hallucination/groundedness against retrieved chunks, refusal on unsafe content) before a response is returned to the user.
+
+---
+
 ## Further Reading
 
-- [Chunking Strategies](docs/CHUNKING_STRATEGIES.md)
-- [Project Architecture](docs/PROJECT_ARCHITECTURE_SUMMARY.md)
-- [Testing Guide](docs/TESTING.md)
+- [Chunking Strategies](docs/20260619_chunking-strategies.md)
+- [Project Architecture](docs/20260619_project-architecture-summary.md)
+- [Ingestion Workflow](docs/20260802_ingestion_workflow.md)
+- [Testing Guide](docs/20260619_testing.md)

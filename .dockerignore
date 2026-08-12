@@ -63,6 +63,7 @@ docker-compose*.yml
 
 # Documentation
 docs/
+!docs/images/
 
 # Tests
 tests/
@@ -71,7 +72,7 @@ test_*.py
 *_test.py
 .pytest_cache/
 .coverage
-htmlcov/
+tests/htmlcov/
 
 # Jupyter Notebooks
 *.ipynb
@@ -84,7 +85,7 @@ uploads/
 *.parquet
 
 # Experiments and examples
-experiment/
+experiments/
 examples/
 
 # Temporary files
@@ -106,3 +107,5 @@ yarn-error.log
 *.bak
 *.backup
 *.old
+*.archive
+celerybeat-schedule

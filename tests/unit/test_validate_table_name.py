@@ -4,16 +4,10 @@ Unit tests for validate_table_name() in api/validators.py.
 Covers the SQL injection prevention regex:
   ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$
 """
-import sys
-from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from api.validators import validate_table_name
+from app.api.validators import validate_table_name
 
 
 class TestValidTableNames:

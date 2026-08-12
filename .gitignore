@@ -22,18 +22,15 @@ __pycache__/
 dist/
 build/
 
-# Temporary upload directories
-temp_uploads/
-uploads/*.pdf
-uploads/*.docx
-uploads/*.txt
-!uploads/.gitkeep
+# Derived pipeline artifacts (parsed markdown, chunk dumps, input, temp uploads) — regenerable
+data/
 
-# Input data
-input/
+# Docker container logs
+logs/
+!logs/.gitkeep
 
 # Test artifacts
-htmlcov/
+tests/htmlcov/
 .coverage
 .pytest_cache/
 .tox/
@@ -43,6 +40,13 @@ htmlcov/
 
 # Cursor rules
 *.cursorrules
-*.md
 
 *.claude
+*.opencode
+
+# Temporary and backup files
+*.tmp
+*.bak
+.ipynb_checkpoints/
+
+celerybeat-schedule

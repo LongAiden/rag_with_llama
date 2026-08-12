@@ -1,0 +1,45 @@
+# ============================================
+# PostgreSQL with pgvector + pgRouting + PostGIS
+# OPTIMIZED: Combined RUN layers, single apt-get update
+# ============================================
+
+FROM postgres:16
+
+# Install ALL dependencies in a single layer to minimize build time
+# - Build tools for pgvector compilation
+# - PostGIS and pgRouting from apt (pre-built)
+# - pgvector downloaded as tarball (faster than git clone)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        postgresql-server-dev-16 \
+        wget \
+        ca-certificates \
+        postgresql-16-postgis-3 \
+        postgresql-16-pgrouting \
+    && cd /tmp \
+    && wget -q https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.0.tar.gz \
+    && tar -xzf v0.8.0.tar.gz \
+    && cd pgvector-0.8.0 \
+    && make OPTFLAGS="" -j$(nproc) \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/pgvector-0.8.0 /tmp/v0.8.0.tar.gz \
+    && apt-get purge -y --auto-remove build-essential postgresql-server-dev-16 wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add custom postgresql.conf settings for better performance
+RUN echo "shared_preload_libraries = 'pg_stat_statements'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "max_connections = 100" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "shared_buffers = 256MB" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "effective_cache_size = 1GB" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "maintenance_work_mem = 64MB" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "checkpoint_completion_target = 0.9" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "wal_buffers = 16MB" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "default_statistics_target = 100" >> /usr/share/postgresql/postgresql.conf.sample
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+    CMD pg_isready -U $POSTGRES_USER -d $POSTGRES_DB || exit 1

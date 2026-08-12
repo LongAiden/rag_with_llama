@@ -1,0 +1,816 @@
+{% extends "base.html" %}
+
+{% block title %}pgvector RAG System{% endblock %}
+
+{% block css %}
+<style>
+{% raw %}
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    max-width: 800px;
+    margin: 50px auto;
+    padding: 20px;
+    background:
+        linear-gradient(rgba(10, 20, 35, 0.50), rgba(10, 20, 35, 0.50)),
+        url('/images/moutain_pexcel.jpeg') center center / cover fixed;
+}
+.section {
+    margin: 30px 0;
+    padding: 25px;
+    background: rgba(255, 255, 255, 0.32);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.44);
+    border-top: 2px solid rgba(59, 130, 246, 0.65);
+    border-radius: 12px;
+}
+input, textarea {
+    margin: 0;
+    padding: 10px 12px;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.40);
+    border-radius: 8px;
+    font-size: 14px;
+    background: rgba(255, 255, 255, 0.88);
+    color: #1a1a2e;
+}
+input:focus, textarea:focus {
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.80);
+    background: rgba(255, 255, 255, 0.96);
+}
+input::placeholder, textarea::placeholder {
+    color: #888;
+}
+.form-group {
+    margin: 12px 0;
+}
+.form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.80);
+    margin-bottom: 5px;
+    letter-spacing: 0.02em;
+}
+button {
+    background: linear-gradient(135deg, #007bff, #0056b3);
+    color: white;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+}
+.stats {
+    background: #e3f2fd;
+    padding: 15px;
+    border-radius: 8px;
+    margin: 20px 0;
+}
+h1 { color: #ffffff; text-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15px; border-left: 3px solid #3b82f6; padding-left: 10px; }
+.section > p { color: rgba(255, 255, 255, 0.88); }
+.hero-card {
+    background: rgba(255, 255, 255, 0.24);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.40);
+    border-top: 3px solid #3b82f6;
+    border-radius: 16px;
+    padding: 24px 32px;
+    margin-bottom: 24px;
+}
+.hero-card .stats {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.9);
+    padding: 10px 0 0 0;
+    margin: 0;
+    border: none;
+}
+.hero-card .stats strong { color: white; }
+
+/* Success notification styles */
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 15px 25px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    color: white;
+    font-weight: 600;
+    z-index: 1000;
+    opacity: 0;
+    transform: translateX(400px);
+    transition: all 0.3s ease;
+}
+.notification.success {
+    background: linear-gradient(135deg, #28a745, #20c997);
+}
+.notification.error {
+    background: linear-gradient(135deg, #dc3545, #e74c3c);
+}
+.notification.show {
+    opacity: 1;
+    transform: translateX(0);
+}
+.notification .close {
+    float: right;
+    margin-left: 15px;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+}
+
+/* Tab styles */
+.tab-bar {
+    display: flex;
+    gap: 8px;
+    margin: 20px 0 12px 0;
+}
+.tab-btn {
+    padding: 10px 28px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.75);
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 15px;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.tab-btn:hover {
+    background: rgba(255, 255, 255, 0.28);
+    color: #ffffff;
+}
+.tab-btn.active {
+    background: rgba(59, 130, 246, 0.35);
+    border-color: rgba(59, 130, 246, 0.70);
+    color: #e0f0ff;
+    box-shadow: 0 2px 12px rgba(59, 130, 246, 0.30);
+}
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.model-select {
+    margin: 0;
+    padding: 10px 12px;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.40);
+    border-radius: 8px;
+    font-size: 14px;
+    background: rgba(255, 255, 255, 0.88);
+    color: #1a1a2e;
+    cursor: pointer;
+}
+.model-select:focus { outline: none; border-color: rgba(255,255,255,0.80); }
+
+/* Chat UI */
+#chat-messages {
+    height: 480px;
+    overflow-y: auto;
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    background: rgba(59, 130, 246, 0.12);
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+.user-bubble {
+    align-self: flex-end;
+    max-width: 75%;
+    background: linear-gradient(135deg, #007bff, #0056b3);
+    color: white;
+    padding: 12px 16px;
+    border-radius: 18px 18px 4px 18px;
+    font-size: 14px;
+    line-height: 1.5;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+}
+.ai-bubble {
+    align-self: flex-start;
+    max-width: 88%;
+    background: white;
+    border: 1px solid #e9ecef;
+    padding: 16px;
+    border-radius: 4px 18px 18px 18px;
+    font-size: 14px;
+    line-height: 1.6;
+    word-wrap: break-word;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+}
+.ai-answer-text { white-space: pre-wrap; margin-bottom: 12px; }
+.sources-section { border-top: 1px solid #e9ecef; padding-top: 10px; margin-top: 8px; }
+.sources-header { font-weight: 600; font-size: 13px; color: #495057; margin-bottom: 8px; }
+.source-item {
+    background: #f8f9fa;
+    border-left: 3px solid #007bff;
+    padding: 8px 10px;
+    margin: 6px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 12px;
+    color: #555;
+}
+.source-meta { font-weight: 600; color: #333; margin-bottom: 3px; }
+.source-doc { font-weight: 700; color: #1a1a1a; }
+.source-text {
+    color: #666;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    white-space: pre-wrap;
+}
+.token-line {
+    border-top: 1px solid #e9ecef;
+    padding-top: 8px;
+    margin-top: 10px;
+    font-size: 11px;
+    color: #888;
+    font-family: 'Courier New', monospace;
+}
+.loading-bubble {
+    align-self: flex-start;
+    background: white;
+    border: 1px solid #e9ecef;
+    padding: 12px 16px;
+    border-radius: 4px 18px 18px 18px;
+    color: #888;
+    font-size: 13px;
+    font-style: italic;
+}
+.error-bubble {
+    align-self: flex-start;
+    max-width: 85%;
+    background: #fff5f5;
+    border: 1px solid #f5c6cb;
+    padding: 12px 16px;
+    border-radius: 4px 18px 18px 18px;
+    color: #721c24;
+    font-size: 13px;
+}
+#chat-input-bar { display: flex; gap: 8px; align-items: stretch; }
+#chat-input { flex: 1; margin: 0; resize: none; min-height: 44px; max-height: 120px; }
+#chat-send { white-space: nowrap; padding: 0 20px; flex-shrink: 0; align-self: stretch; }
+.settings-toggle {
+    background: rgba(255, 255, 255, 0.28);
+    border: 1px solid rgba(59, 130, 246, 0.45);
+    color: rgba(255, 255, 255, 0.90);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    margin-bottom: 12px;
+    backdrop-filter: blur(4px);
+}
+.settings-toggle:hover { background: rgba(255,255,255,0.40); transform: none; box-shadow: none; }
+#settings-panel {
+    display: none;
+    background: rgba(255, 255, 255, 0.34);
+    border: 1px solid rgba(255, 255, 255, 0.30);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+    font-size: 13px;
+}
+#settings-panel label { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-weight: 500; color: rgba(255,255,255,0.90); }
+#settings-panel input[type="number"],
+#settings-panel input[type="password"] { padding: 6px 10px; font-size: 13px; width: auto; }
+#settings-panel .model-select { padding: 6px 10px; font-size: 13px; }
+.btn-outline {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.45);
+    color: rgba(255,255,255,0.85);
+    padding: 9px 18px;
+    font-size: 13px;
+    font-weight: 500;
+}
+.btn-outline:hover { background: rgba(255,255,255,0.28); transform: none; box-shadow: none; }
+{% endraw %}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="hero-card">
+    <h1>🚀 pgvector RAG System</h1>
+    <div class="stats">
+        <strong>Powered by:</strong> PostgreSQL + pgvector for high-performance similarity search
+    </div>
+</div>
+
+<div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('chat', this)">💬 Chat</button>
+    <button class="tab-btn" onclick="switchTab('embed', this)">📤 Embed</button>
+</div>
+
+<div id="tab-chat" class="tab-panel active section">
+    <h2>💬 Chat</h2>
+    <p>Semantic search powered by sentence embeddings and pgvector cosine similarity.</p>
+    <button class="settings-toggle" onclick="toggleSettings()">⚙️ Settings ▾</button>
+    <div id="settings-panel">
+        <label>Model:
+            <select id="chat-model" class="model-select">
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <option value="deepseek-r1:1.5b">DeepSeek R1 8B (Ollama)</option>
+                <option value="deepseek-r1:1.5b">DeepSeek R1 1.5B (Ollama)</option>
+                <option value="llama3.2:3b">Llama 3.2 3B (Ollama)</option>
+            </select>
+        </label>
+        <label>Search Mode:
+            <select id="chat-search-mode" class="model-select">
+                <option value="vector">Vector Only (faster)</option>
+                <option value="hybrid">Hybrid (Vector + BM25)</option>
+            </select>
+        </label>
+        <label>Max Results: <input type="number" id="chat-limit" value="5" min="1" max="100" style="width:70px;"></label>
+        <label>Threshold: <input type="number" id="chat-threshold" value="0.5" min="0.0" max="0.95" step="0.05" style="width:80px;"></label>
+        <label>Domain:
+            <select id="chat-domain" class="model-select" style="margin:0;padding:6px 10px;font-size:13px;" onchange="loadDomainDocuments()">
+                <option value="document_chunks">document_chunks (loading...)</option>
+            </select>
+            <button type="button" onclick="loadDomainList()" title="Refresh domain list" style="margin-left:6px;padding:6px 10px;font-size:13px;cursor:pointer;">↻</button>
+        </label>
+        <label>Document:
+            <select id="chat-document" class="model-select" style="margin:0;padding:6px 10px;font-size:13px;">
+                <option value="">All documents in domain</option>
+            </select>
+        </label>
+        <label>Password: <input type="password" id="chat-password" placeholder="Required if configured"></label>
+    </div>
+    <div id="chat-messages"></div>
+    <div id="chat-input-bar">
+        <textarea id="chat-input" placeholder="Ask a question about your documents... (Ctrl+Enter to send)" rows="2"></textarea>
+        <button id="chat-send" onclick="sendChat()">Send</button>
+    </div>
+    <div style="margin-top: 20px; display: flex; gap: 10px;">
+        <button type="button" class="btn-outline" onclick="clearChat()">🗑️ Clear</button>
+        <a href="/stats" target="_blank"><button type="button" class="btn-outline">📊 Statistics</button></a>
+        <a href="/health" target="_blank"><button type="button" class="btn-outline">🏥 Health</button></a>
+    </div>
+</div>
+
+<div id="tab-embed" class="tab-panel section">
+    <h2>📤 Upload & Process Document</h2>
+    <p>Supported formats: PDF, DOCX, TXT. Documents are chunked semantically and stored with vector embeddings.</p>
+    <form action="/upload" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>Document File</label>
+            <input type="file" name="file" accept=".pdf,.docx,.txt" required>
+        </div>
+        <div class="form-group">
+            <label>PDF Parsing Backend</label>
+            <select name="parse_backend" class="model-select">
+                <option value="ollama">Local LLM — qwen3.5:0.8b (Ollama)</option>
+                <option value="gemini-docling">Gemini Vision (docling)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Access Password</label>
+            <input type="password" name="access_password" placeholder="Required if configured">
+        </div>
+        <div class="form-group">
+            <label>Document Name</label>
+            <input type="text" name="doc_name" placeholder="e.g. Linear Algebra (defaults to the file name)">
+        </div>
+        <div class="form-group">
+            <label style="display:flex;align-items:center;justify-content:space-between;">Domain
+                <button type="button" onclick="loadDomainList()" title="Refresh domain list"
+                        style="padding:4px 8px;font-size:13px;cursor:pointer;">↻</button>
+            </label>
+            <select id="upload-domain" class="model-select" onchange="toggleNewDomain(this)">
+                <option value="__new__">➕ New domain…</option>
+            </select>
+            <input type="text" id="upload-new-domain" placeholder="lowercase_with_underscores"
+                   style="display:none;margin-top:8px;">
+            <!-- The submit handler writes whichever control is active into this field,
+                 so the form posts a single `domain` value either way. -->
+            <input type="hidden" name="domain" id="upload-domain-value">
+        </div>
+        <div class="form-group">
+            <label>Chunk Size</label>
+            <input type="number" name="chunk_size" value="512" min="128" max="2048">
+        </div>
+        <div style="margin-top: 18px;">
+            <button type="submit">📤 Upload & Process</button>
+        </div>
+    </form>
+</div>
+
+    <!-- Success/Error notification -->
+<div id="notification" class="notification">
+    <span class="close" onclick="hideNotification()">x</span>
+    <span id="notification-message"></span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function switchTab(tab, btn) {
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('tab-' + tab).classList.add('active');
+        btn.classList.add('active');
+    }
+
+    const PASSWORD_KEY = 'rag_access_password';
+
+    function loadPassword() {
+        try {
+            return localStorage.getItem(PASSWORD_KEY) || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function savePassword(value) {
+        try {
+            if (value) localStorage.setItem(PASSWORD_KEY, value);
+        } catch (e) {
+            // ignore storage issues
+        }
+    }
+
+    function hydratePasswordInputs() {
+        const saved = loadPassword();
+        if (!saved) return;
+        document.querySelectorAll('input[name="access_password"]').forEach((el) => {
+            if (!el.value) el.value = saved;
+        });
+    }
+
+    function cachePasswordFromForm(form) {
+        const field = form.querySelector('input[name="access_password"]');
+        if (field && field.value) savePassword(field.value);
+    }
+
+    hydratePasswordInputs();
+
+    // Show notification function
+    function showNotification(message, type = 'success') {
+        const notification = document.getElementById('notification');
+        const messageElement = document.getElementById('notification-message');
+
+        messageElement.textContent = message;
+        notification.className = `notification ${type}`;
+
+        // Show notification
+        setTimeout(() => {
+            notification.classList.add('show');
+        }, 100);
+
+        // Auto hide after 5 seconds
+        setTimeout(() => {
+            hideNotification();
+        }, 5000);
+    }
+
+    // Hide notification function
+    function hideNotification() {
+        const notification = document.getElementById('notification');
+        notification.classList.remove('show');
+    }
+
+    // Ingestion runs asynchronously in a Celery worker, so /upload only returns
+    // "queued". Poll the status DB until the document reaches a terminal stage.
+    async function pollDocumentStatus(documentId, label) {
+        let filename = label;
+        const POLL_MS = 3000;
+        const deadline = Date.now() + 15 * 60 * 1000;  // VLM PDF parsing is slow
+
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, POLL_MS));
+
+            let status;
+            try {
+                const res = await fetch(`/documents/${documentId}/status`);
+                if (!res.ok) { continue; }
+                status = await res.json();
+            } catch (err) {
+                continue;  // transient blip, keep polling
+            }
+
+            // Prefer the stored name once the status row is readable — the caller's
+            // label is only a best guess before the row exists.
+            filename = status.doc_name || filename;
+
+            if (status.stage === 'embedded') {
+                const n = status.chunk_count || 0;
+                showNotification(`"${filename}" ingested — ${n} chunks indexed.`, 'success');
+                return;
+            }
+            if (status.stage === 'failed') {
+                showNotification(`Ingestion failed for "${filename}": ${status.last_error || 'unknown error'}`, 'error');
+                return;
+            }
+            showNotification(`Processing "${filename}" — ${status.stage}...`, 'success');
+        }
+
+        showNotification(
+            `"${filename}" is still processing. Check /documents/${documentId}/status.`,
+            'success'
+        );
+    }
+
+    // Handle upload form submission with AJAX
+    document.querySelector('form[action="/upload"]').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        cachePasswordFromForm(this);
+        hydratePasswordInputs();
+
+        const domainValue = resolveUploadDomain();
+        if (!domainValue) {
+            showNotification('Pick a domain, or type a name for the new one.', 'error');
+            return;
+        }
+        document.getElementById('upload-domain-value').value = domainValue;
+
+        const formData = new FormData(this);
+        const submitButton = this.querySelector('button[type="submit"]');
+        const originalText = submitButton.textContent;
+
+        // Show loading state
+        submitButton.textContent = 'Processing...';
+        submitButton.disabled = true;
+
+        try {
+            const response = await fetch('/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.status === 'duplicate') {
+                showNotification(result.message, 'error');
+            } else if (response.ok) {
+                const label = result.doc_name || result.filename;
+                showNotification(`"${label}" queued for processing in "${result.domain}"...`, 'success');
+                this.reset(); // Clear the form
+                hydratePasswordInputs();
+                loadDomainList();  // a brand-new domain now exists
+                pollDocumentStatus(result.document_id, label);
+            } else {
+                showNotification(`Upload failed: ${result.detail}`, 'error');
+            }
+        } catch (error) {
+            showNotification(`Upload failed: ${error.message}`, 'error');
+        } finally {
+            // Restore button
+            submitButton.textContent = originalText;
+            submitButton.disabled = false;
+        }
+    });
+
+    // Check for URL parameters to show notifications (if redirected)
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('upload') === 'success') {
+        showNotification('Document uploaded and processed successfully!', 'success');
+    } else if (urlParams.get('upload') === 'error') {
+        showNotification('Upload failed. Please try again.', 'error');
+    }
+
+    // ── Chat UI ──────────────────────────────────────────────────────────
+
+    function toggleSettings() {
+        const panel = document.getElementById('settings-panel');
+        const btn = document.querySelector('.settings-toggle');
+        if (panel.style.display === 'block') {
+            panel.style.display = 'none';
+            btn.textContent = '⚙️ Settings ▾';
+        } else {
+            panel.style.display = 'block';
+            btn.textContent = '⚙️ Settings ▴';
+            const saved = loadPassword();
+            if (saved && !document.getElementById('chat-password').value) {
+                document.getElementById('chat-password').value = saved;
+            }
+        }
+    }
+
+    function escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    function clearChat() {
+        const messages = document.getElementById('chat-messages');
+        messages.innerHTML = '';
+        messages.style.display = 'none';
+    }
+
+    function appendBubble(html, className) {
+        const messages = document.getElementById('chat-messages');
+        messages.style.display = 'flex';
+        const div = document.createElement('div');
+        div.className = className;
+        div.innerHTML = html;
+        messages.appendChild(div);
+        messages.scrollTop = messages.scrollHeight;
+        return div;
+    }
+
+    async function sendChat() {
+        const input = document.getElementById('chat-input');
+        const query = input.value.trim();
+        if (!query) return;
+
+        const model = document.getElementById('chat-model').value;
+        const search_mode = document.getElementById('chat-search-mode').value;
+        const limit = parseInt(document.getElementById('chat-limit').value) || 5;
+        const threshold = parseFloat(document.getElementById('chat-threshold').value) || 0.5;
+        const domain = document.getElementById('chat-domain').value || 'document_chunks';
+        const selectedDoc = document.getElementById('chat-document').value;
+        const password = document.getElementById('chat-password').value || loadPassword();
+        if (password) savePassword(password);
+
+        input.value = '';
+        input.style.height = 'auto';
+        const sendBtn = document.getElementById('chat-send');
+        sendBtn.disabled = true;
+        sendBtn.textContent = '...';
+
+        appendBubble(escapeHtml(query), 'user-bubble');
+        const loadingBubble = appendBubble('🤔 Thinking...', 'loading-bubble');
+
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (password) headers['x-app-password'] = password;
+
+            const payload = { query, limit, threshold, model, domain, search_mode };
+            // Scoping to one document is exact — it filters on the id, not the name,
+            // so two uploads sharing a name stay distinguishable.
+            if (selectedDoc) payload.document_ids = [selectedDoc];
+
+            const res = await fetch('/query', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(payload)
+            });
+
+            loadingBubble.remove();
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: res.statusText }));
+                appendBubble(`<strong>Error:</strong> ${escapeHtml(err.detail || 'Unknown error')}`, 'error-bubble');
+                return;
+            }
+
+            const data = await res.json();
+            const stats = data.search_stats || {};
+
+            // Build sources HTML
+            let sourcesHtml = '';
+            if (data.sources && data.sources.length > 0) {
+                const items = data.sources.map((s, i) => {
+                    const sim = (s.similarity * 100).toFixed(1);
+                    const bm25 = s.bm25_score != null ? ` &nbsp;·&nbsp; BM25: ${s.bm25_score.toFixed(3)}` : '';
+                    const rrf = s.rrf_score != null ? ` &nbsp;·&nbsp; RRF: ${s.rrf_score.toFixed(3)}` : '';
+                    const rerank = s.rerank_score != null ? ` &nbsp;·&nbsp; Rerank: ${s.rerank_score.toFixed(3)}` : '';
+                    // Lead with the document name; fall back to the id prefix for
+                    // chunks written before doc_name existed. Full id on hover.
+                    const docLabel = s.doc_name
+                        ? escapeHtml(s.doc_name)
+                        : (s.document_id ? escapeHtml(s.document_id.substring(0, 8)) + '…' : 'N/A');
+                    const docTitle = s.document_id ? ` title="${escapeHtml(s.document_id)}"` : '';
+                    const page = s.page_number != null ? ` &nbsp;·&nbsp; Page ${s.page_number}` : '';
+                    return `<div class="source-item">
+                        <div class="source-meta">Source ${i + 1} &mdash; ${sim}% similarity${bm25}${rrf}${rerank}
+                            &nbsp;|&nbsp; <span class="source-doc"${docTitle}>📄 ${docLabel}</span>${page}</div>
+                        <div class="source-text">${escapeHtml(s.text)}</div>
+                    </div>`;
+                }).join('');
+                sourcesHtml = `<div class="sources-section">
+                    <div class="sources-header">📚 Sources (${data.sources.length})</div>
+                    ${items}
+                </div>`;
+            }
+
+            // Token line
+            const inTok = stats.input_tokens;
+            const outTok = stats.output_tokens;
+            const totalTok = stats.total_tokens;
+            const tokenLine = totalTok
+                ? `<div class="token-line">🪙 &uarr;&nbsp;${inTok != null ? inTok.toLocaleString() : '?'} in &nbsp;&middot;&nbsp; &darr;&nbsp;${outTok != null ? outTok.toLocaleString() : '?'} out &nbsp;&middot;&nbsp; &Sigma;&nbsp;${totalTok.toLocaleString()} total</div>`
+                : '';
+
+            // Search stats line
+            const chunksFound = stats.chunks_found != null ? stats.chunks_found : '?';
+            const searchMethod = stats.search_method || '?';
+            const tableUsed = data.table_used || '?';
+            const statsLine = `<div class="token-line">🔍 ${chunksFound} chunks &nbsp;&middot;&nbsp; 📋 ${escapeHtml(tableUsed)} &nbsp;&middot;&nbsp; ⚙️ ${escapeHtml(searchMethod)}</div>`;
+
+            appendBubble(
+                `<div class="ai-answer-text">${escapeHtml(data.answer || '')}</div>${sourcesHtml}${statsLine}${tokenLine}`,
+                'ai-bubble'
+            );
+        } catch (err) {
+            loadingBubble.remove();
+            appendBubble(`<strong>Error:</strong> ${escapeHtml(err.message)}`, 'error-bubble');
+        } finally {
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send';
+        }
+    }
+
+    // Ctrl+Enter sends the message
+    document.getElementById('chat-input').addEventListener('keydown', function(e) {
+        if (e.ctrlKey && e.key === 'Enter') {
+            e.preventDefault();
+            sendChat();
+        }
+    });
+
+    // Hydrate password into chat panel on load
+    (function() {
+        const saved = loadPassword();
+        if (saved) document.getElementById('chat-password').value = saved;
+    })();
+
+    // ── Domains ──────────────────────────────────────────────────────────
+
+    // Fills both the chat domain picker and the upload domain picker from
+    // /domains. The upload picker keeps a trailing "new domain" entry: uploading
+    // into a domain that does not exist yet creates it, so there is no separate
+    // create step to walk the user through.
+    async function loadDomainList() {
+        let domains = [];
+        try {
+            const res = await fetch('/domains');
+            if (res.ok) {
+                const data = await res.json();
+                domains = data.domains || [];
+            }
+        } catch (_) { /* fall through to the defaults below */ }
+
+        const chatSel = document.getElementById('chat-domain');
+        if (domains.length > 0) {
+            const current = chatSel.value;
+            chatSel.innerHTML = domains.map(d =>
+                `<option value="${escapeHtml(d.name)}">${escapeHtml(d.display_name)} (${d.document_count})</option>`
+            ).join('');
+            if (current && [...chatSel.options].some(o => o.value === current)) chatSel.value = current;
+            loadDomainDocuments();
+        }
+
+        const uploadSel = document.getElementById('upload-domain');
+        if (uploadSel) {
+            const current = uploadSel.value;
+            uploadSel.innerHTML = domains.map(d =>
+                `<option value="${escapeHtml(d.name)}">${escapeHtml(d.display_name)}</option>`
+            ).join('') + '<option value="__new__">➕ New domain…</option>';
+            if (current && [...uploadSel.options].some(o => o.value === current)) uploadSel.value = current;
+            toggleNewDomain(uploadSel);
+        }
+    }
+
+    function toggleNewDomain(sel) {
+        const input = document.getElementById('upload-new-domain');
+        input.style.display = sel.value === '__new__' ? 'block' : 'none';
+    }
+
+    function resolveUploadDomain() {
+        const sel = document.getElementById('upload-domain');
+        if (sel.value === '__new__') {
+            return document.getElementById('upload-new-domain').value.trim();
+        }
+        return sel.value;
+    }
+
+    // Documents are listed from the ingestion status table, so one still being
+    // parsed shows up disabled with its stage rather than silently missing.
+    async function loadDomainDocuments() {
+        const sel = document.getElementById('chat-document');
+        const domain = document.getElementById('chat-domain').value;
+        sel.innerHTML = '<option value="">All documents in domain</option>';
+        if (!domain) return;
+        try {
+            const res = await fetch(`/domains/${encodeURIComponent(domain)}/documents`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const docs = data.documents || [];
+            sel.innerHTML += docs.map(d => {
+                const name = d.doc_name || d.file_name;
+                const ready = d.stage === 'embedded';
+                const suffix = ready ? ` (${d.chunk_count || 0})` : ` — (${d.stage})`;
+                return `<option value="${escapeHtml(d.document_id)}"${ready ? '' : ' disabled'}>${escapeHtml(name)}${suffix}</option>`;
+            }).join('');
+        } catch (_) { /* leave the "all documents" default in place */ }
+    }
+
+    loadDomainList();
+</script>
+{% endblock %}

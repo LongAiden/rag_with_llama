@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block title %}Health Check - pgvector RAG{% endblock %}
+
+{% block css %}
+<style>
+.status-main {
+    border-left: 6px solid {{ status_color }};
+}
+.status-text {
+    color: {{ status_color }};
+    text-shadow: 0 0 12px {{ status_color }};
+}
+.db-status-text {
+    color: {{ status_color }};
+    text-shadow: 0 0 8px {{ status_color }};
+}
+</style>
+<style>
+{% raw %}
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    max-width: 800px;
+    margin: 50px auto;
+    padding: 20px;
+    background:
+        linear-gradient(rgba(10, 20, 35, 0.50), rgba(10, 20, 35, 0.50)),
+        url('/images/moutain_pexcel.jpeg') center center / cover fixed;
+    line-height: 1.6;
+}
+.header {
+    background: rgba(255, 255, 255, 0.24);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.40);
+    border-top: 3px solid #3b82f6;
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+.status-main {
+    background: rgba(255, 255, 255, 0.32);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.44);
+    padding: 30px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+.status-icon {
+    font-size: 4rem;
+    margin-bottom: 15px;
+}
+.status-text {
+    font-size: 1.5rem;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+.components-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.component-card {
+    background: rgba(255, 255, 255, 0.32);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.44);
+    border-top: 2px solid rgba(59, 130, 246, 0.65);
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+}
+.component-status {
+    font-size: 2rem;
+    margin-bottom: 10px;
+}
+.component-name {
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
+    margin-bottom: 5px;
+}
+.component-detail {
+    color: #ffffff;
+    font-size: 0.9rem;
+}
+.metrics-section {
+    background: rgba(255, 255, 255, 0.32);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.44);
+    border-top: 2px solid rgba(59, 130, 246, 0.65);
+    padding: 25px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+}
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 15px;
+}
+.metric-item {
+    text-align: center;
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.34);
+    border-radius: 8px;
+}
+.metric-number {
+    font-size: 1.8rem;
+    font-weight: bold;
+    color: #22d3ee;
+    text-shadow: 0 0 14px rgba(34, 211, 238, 0.7);
+    margin-bottom: 5px;
+}
+.metric-label {
+    color: #ffffff;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+}
+button {
+    background: linear-gradient(135deg, #007bff, #0056b3);
+    color: white;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    text-decoration: none;
+    display: inline-block;
+    margin: 5px;
+}
+h1 { color: #ffffff; text-shadow: 0 2px 8px rgba(0,0,0,0.4); margin-bottom: 10px; }
+h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15px; border-left: 3px solid #3b82f6; padding-left: 10px; }
+.timestamp {
+    background: rgba(227, 242, 253, 0.15);
+    border: 1px solid rgba(255,255,255,0.20);
+    padding: 15px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: rgba(255,255,255,0.75);
+    text-align: center;
+}
+{% endraw %}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>🏥 System Health Check</h1>
+    <p>Real-time status monitoring for your RAG system</p>
+    <a href="/"><button>← Back to Home</button></a>
+    <a href="/stats"><button>📊 View Statistics</button></a>
+</div>
+
+<div class="status-main">
+    <div class="status-icon">{{ status_icon }}</div>
+    <div class="status-text">System {{ db_status_upper }}</div>
+</div>
+
+<div class="components-grid">
+    <div class="component-card">
+        <div class="component-status">🗄️</div>
+        <div class="component-name">Database</div>
+        <div class="component-detail">PostgreSQL + pgvector</div>
+        <div class="component-detail db-status-text">{{ db_status_upper }}</div>
+    </div>
+    <div class="component-card">
+        <div class="component-status">🧠</div>
+        <div class="component-name">Embedding Model</div>
+        <div class="component-detail">{{ embedding_model }}</div>
+        <div class="component-detail" style="color: #4ade80; font-weight: bold; text-shadow: 0 0 8px rgba(74,222,128,0.55);">LOADED</div>
+    </div>
+    <div class="component-card">
+        <div class="component-status">🔍</div>
+        <div class="component-name">Vector Store</div>
+        <div class="component-detail">Table: {{ table_name }}</div>
+        <div class="component-detail" style="color: #4ade80; font-weight: bold; text-shadow: 0 0 8px rgba(74,222,128,0.55);">OPERATIONAL</div>
+    </div>
+</div>
+
+<div class="metrics-section">
+    <h2>📈 Quick Metrics</h2>
+    <div class="metrics-grid">
+        <div class="metric-item">
+            <div class="metric-number">{{ total_documents }}</div>
+            <div class="metric-label">Documents</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-number">{{ total_chunks }}</div>
+            <div class="metric-label">Chunks</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-number">{{ embedding_dim }}</div>
+            <div class="metric-label">Embedding Dim</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-number">{{ avg_text_length }}</div>
+            <div class="metric-label">Avg Text Length</div>
+        </div>
+    </div>
+</div>
+
+<div class="timestamp">
+    <strong>Last Updated:</strong> {{ timestamp }} | <strong>Auto-refresh:</strong> Every 30 seconds
+</div>
+{% endblock %}

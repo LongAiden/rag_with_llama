@@ -1,13 +1,15 @@
 """
 Unit tests for the LLM Provider abstraction.
 
-Tests the LLMProvider interface and GeminiLLMProvider implementation.
+Tests the LLMProvider interface and concrete provider implementations
+(Gemini, Ollama) without making real external API calls.
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from graph_processing.llm_provider import LLMProvider
-from graph_processing.gemini_provider import GeminiLLMProvider
+from app.graph.llm_provider import LLMProvider
+from app.graph.gemini_provider import GeminiLLMProvider
+from app.graph.ollama_provider import OllamaLLMProvider
 
 
 class MockLLMProvider(LLMProvider):
@@ -70,13 +72,13 @@ class TestGeminiLLMProvider:
 
     def test_provider_name(self):
         """Test that GeminiLLMProvider returns correct provider name."""
-        with patch('graph_processing.gemini_provider.genai'):
+        with patch('app.graph.gemini_provider.genai'):
             provider = GeminiLLMProvider(api_key="test-key", model_name="gemini-2.5-flash")
             assert provider.get_provider_name() == "gemini"
 
     def test_extract_text_from_response(self):
         """Test text extraction from Gemini response."""
-        with patch('graph_processing.gemini_provider.genai'):
+        with patch('app.graph.gemini_provider.genai'):
             provider = GeminiLLMProvider(api_key="test-key", model_name="gemini-2.5-flash")
 
             mock_response = MagicMock()
@@ -88,7 +90,7 @@ class TestGeminiLLMProvider:
     @pytest.mark.asyncio
     async def test_generate_content_calls_model(self):
         """Test that generate_content calls the underlying model."""
-        with patch('graph_processing.gemini_provider.genai') as mock_genai:
+        with patch('app.graph.gemini_provider.genai') as mock_genai:
             # Setup mock
             mock_model = MagicMock()
             mock_response = MagicMock()
@@ -102,3 +104,106 @@ class TestGeminiLLMProvider:
 
             assert response == mock_response
             mock_model.generate_content_async.assert_called_once_with("Test prompt")
+
+
+class TestOllamaLLMProvider:
+    """Test the OllamaLLMProvider implementation."""
+
+    def test_provider_name(self):
+        """Test that OllamaLLMProvider returns correct provider name."""
+        provider = OllamaLLMProvider(base_url="http://localhost:11434")
+        assert provider.get_provider_name() == "ollama"
+
+    def test_base_url_strips_trailing_slash(self):
+        """Test that trailing slash is stripped from base URL."""
+        provider = OllamaLLMProvider(base_url="http://localhost:11434/")
+        assert provider.base_url == "http://localhost:11434"
+
+    def test_extract_text_from_response(self):
+        """Test text extraction from Ollama JSON response."""
+        provider = OllamaLLMProvider(base_url="http://localhost:11434")
+
+        response = {"response": "Generated text from Ollama"}
+        result = provider.extract_text_from_response(response)
+
+        assert result == "Generated text from Ollama"
+
+    @pytest.mark.asyncio
+    async def test_generate_content_posts_to_api(self):
+        """Test that generate_content POSTs to the Ollama generate endpoint."""
+        provider = OllamaLLMProvider(
+            base_url="http://localhost:11434",
+            model_name="deepseek-r1:1.5b"
+        )
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value={"response": "Ollama output"})
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch('app.graph.ollama_provider.httpx.AsyncClient', return_value=mock_client):
+            response = await provider.generate_content("Test prompt")
+
+        assert response == {"response": "Ollama output"}
+        mock_client.post.assert_called_once_with(
+            "http://localhost:11434/api/generate",
+            json={"model": "deepseek-r1:1.5b", "prompt": "Test prompt", "stream": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_content_retries_on_error(self):
+        """Test that generate_content retries on HTTP error."""
+        provider = OllamaLLMProvider(
+            base_url="http://localhost:11434",
+            model_name="deepseek-r1:1.5b"
+        )
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value={"response": "Success after retry"})
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        # First call fails, second succeeds
+        mock_client.post = AsyncMock(side_effect=[
+            Exception("Connection failed"),
+            mock_response
+        ])
+
+        with patch('app.graph.ollama_provider.httpx.AsyncClient', return_value=mock_client):
+            response = await provider.generate_content("Test prompt")
+
+        assert response == {"response": "Success after retry"}
+        assert mock_client.post.call_count == 2
+
+
+class TestProviderAbstraction:
+    """Test that all providers adhere to the same interface contract."""
+
+    @pytest.mark.parametrize("provider", [
+        MockLLMProvider(),
+    ])
+    def test_all_providers_have_required_methods(self, provider):
+        """Test that providers implement the required interface."""
+        assert hasattr(provider, 'generate_content')
+        assert hasattr(provider, 'extract_text_from_response')
+        assert hasattr(provider, 'get_provider_name')
+        assert callable(provider.generate_content)
+        assert callable(provider.extract_text_from_response)
+        assert callable(provider.get_provider_name)
+        assert isinstance(provider.get_provider_name(), str)
+
+    def test_provider_name_uniqueness(self):
+        """Test that each provider has a distinct name."""
+        with patch('app.graph.gemini_provider.genai'):
+            gemini = GeminiLLMProvider(api_key="test-key")
+        ollama = OllamaLLMProvider(base_url="http://localhost:11434")
+        mock = MockLLMProvider()
+
+        names = {gemini.get_provider_name(), ollama.get_provider_name(), mock.get_provider_name()}
+        assert len(names) == 3

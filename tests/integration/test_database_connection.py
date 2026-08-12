@@ -44,14 +44,14 @@ class TestDatabaseConnection:
         assert result == 1, "pgvector extension is not installed"
 
     @pytest.mark.asyncio
-    async def test_create_vector_table(self, db_connection, test_table_name, cleanup_test_table):
+    async def test_create_vector_table(self, db_connection, test_table_name, cleanup_test_table, embedding_dim):
         """Test creating a table with vector column."""
-        # Create table with vector column (384 dimensions for all-MiniLM-L6-v2)
+        # Create table with vector column (uses embedding_dim from fixture)
         create_table_query = f"""
         CREATE TABLE {test_table_name} (
             id TEXT PRIMARY KEY,
             text TEXT NOT NULL,
-            embedding vector(384),
+            embedding vector({embedding_dim}),
             metadata JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -78,23 +78,23 @@ class TestDatabaseConnection:
         assert column_info is not None, "Vector column 'embedding' not found"
 
     @pytest.mark.asyncio
-    async def test_insert_and_query_vectors(self, db_connection, test_table_name, cleanup_test_table):
+    async def test_insert_and_query_vectors(self, db_connection, test_table_name, cleanup_test_table, embedding_dim):
         """Test inserting vectors and performing similarity search."""
         # Create test table
         create_table_query = f"""
         CREATE TABLE {test_table_name} (
             id TEXT PRIMARY KEY,
             text TEXT NOT NULL,
-            embedding vector(384)
+            embedding vector({embedding_dim})
         );
         """
         await db_connection.execute(create_table_query)
 
-        # Create sample vectors (384 dimensions)
+        # Create sample vectors (embedding_dim dimensions)
         import random
         random.seed(42)
 
-        def generate_random_vector(dim: int = 384) -> List[float]:
+        def generate_random_vector(dim: int = embedding_dim) -> List[float]:
             """Generate a random normalized vector."""
             vector = [random.random() for _ in range(dim)]
             # Normalize
@@ -138,13 +138,13 @@ class TestDatabaseConnection:
         assert similarities == sorted(similarities, reverse=True), "Results not properly ordered by similarity"
 
     @pytest.mark.asyncio
-    async def test_vector_index_creation(self, db_connection, test_table_name, cleanup_test_table):
+    async def test_vector_index_creation(self, db_connection, test_table_name, cleanup_test_table, embedding_dim):
         """Test creating IVFFLAT index for vector similarity search."""
         # Create test table
         create_table_query = f"""
         CREATE TABLE {test_table_name} (
             id TEXT PRIMARY KEY,
-            embedding vector(384)
+            embedding vector({embedding_dim})
         );
         """
         await db_connection.execute(create_table_query)
@@ -153,7 +153,7 @@ class TestDatabaseConnection:
         import random
         random.seed(42)
         for i in range(10):
-            vector = [random.random() for _ in range(384)]
+            vector = [random.random() for _ in range(embedding_dim)]
             await db_connection.execute(
                 f"INSERT INTO {test_table_name} (id, embedding) VALUES ($1, $2)",
                 f"doc_{i}", vector

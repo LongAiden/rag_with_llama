@@ -1,3 +1,100 @@
+# Notes that apply file-wide:
+#   - reservations.cpus is silently dropped outside swarm mode (containers that
+#     declare it inspect as CpuShares=0). Only limits.cpus (NanoCPUs) applies.
+#   - Memory limits are measured high-water marks, not guesses. The runs behind
+#     them are in docs/plans/ — do not lower one without a new measurement.
+#   - Docker enforces --cpus as a CFS bandwidth quota, so limits may sum above
+#     the VM's CPU count; that costs contention only when services are busy
+#     together, which parse and query are not.
+
+# ============================================
+# Shared environment (anchors)
+# ============================================
+
+# Everything app, both workers and beat have in common.
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+  DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-rag_db}
+
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:1.5b}
+  OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:0.8b}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+
+  INPUT_RAW_DIR: ${INPUT_RAW_DIR:-data/input/raw}
+  PARSED_DIR: ${PARSED_DIR:-data/parsed}
+  CHUNKS_DIR: ${CHUNKS_DIR:-data/chunks}
+  PERSIST_INGESTION_ARTIFACTS: ${PERSIST_INGESTION_ARTIFACTS:-true}
+  INGESTION_MAX_ATTEMPTS: ${INGESTION_MAX_ATTEMPTS:-2}
+  # 180, not 30: a large parse runs tens of minutes, and a shorter timeout lets
+  # the 6-hourly recovery sweep declare a live parse stale, re-dispatch a second
+  # conversion of the same document, and burn the retry budget.
+  INGESTION_CLAIM_TIMEOUT_MINUTES: ${INGESTION_CLAIM_TIMEOUT_MINUTES:-180}
+  DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-512}
+  DEFAULT_PARSE_BACKEND: ${DEFAULT_PARSE_BACKEND:-ollama}
+
+  # ── PDF parse tuning ──
+  # 6, matching the Docker VM's 6 CPUs (docker info NCPU). The host has 8
+  # logical cores, 4 performance + 4 efficiency, so threads 5-6 land on the
+  # slower cores — expect a sub-linear gain. Revert to 4 if the measured
+  # `Converted pages ... rate=Xs/page` on the same document does not improve.
+  DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-6}
+  DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+  DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
+  # 1, not 2: Ollama runs on the same host and serializes on one GPU. Measured
+  # on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+  VLM_CONCURRENCY: ${VLM_CONCURRENCY:-1}
+  # qwen3.5 is a reasoning model and Ollama defaults thinking ON. Measured on a
+  # real table crop: 87.35s versus 2.27s, with the reasoning discarded unread.
+  OLLAMA_VLM_THINK: ${OLLAMA_VLM_THINK:-false}
+  # Tables go to docling's TableFormer — a 0.8B VLM cannot read them (13-column
+  # GLUE table came back with headers "I, II, III…"; a small one came back with
+  # invented rows). true restores the old complexity-gated VLM routing.
+  VLM_TABLES: ${VLM_TABLES:-false}
+  # Latency is pure decode at ~35 tok/s, so elapsed IS the output length, and
+  # Ollama's defaults (temperature 0.8, num_predict -1) leave it unbounded: the
+  # worst call of a 191-call run took 93.3s. Greedy decoding transcribes the
+  # crop in 22-35 tokens instead of inventing one.
+  OLLAMA_VLM_TEMPERATURE: ${OLLAMA_VLM_TEMPERATURE:-0.0}
+  OLLAMA_VLM_NUM_PREDICT: ${OLLAMA_VLM_NUM_PREDICT:-384}
+  # Short-side floor for sending a picture to the VLM. 113 of those 191 calls
+  # were strips under 64px tall — rules and equation lines, not figures — and
+  # consumed 60% of the VLM budget hallucinating content that then gets embedded.
+  VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
+  VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
+
+  # The runtime image ships without a compiler by design, so a downstream
+  # torch.compile path (torchvision NMS in docling's layout pass) dies with
+  # InvalidCxxCompiler. Nothing calls torch.compile, so eager execution is free.
+  TORCHDYNAMO_DISABLE: "1"
+
+# Only the services that run docling and download its weights.
+x-hf-env: &hf-env
+  # huggingface_hub >=0.32 routes supported repos through the Xet backend, which
+  # buffers chunks in its own store and leaves .incomplete at 0 bytes — so a
+  # failed download restarts from scratch. Two parses hung 12+ minutes in
+  # pipeline init before page 1. Classic HTTP range requests do resume.
+  HF_HUB_DISABLE_XET: "1"
+  # 10s defaults timed out repeatedly on the HEAD revalidation for
+  # docling-layout-heron/model.safetensors.
+  HF_HUB_ETAG_TIMEOUT: "30"
+  HF_HUB_DOWNLOAD_TIMEOUT: "60"
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # ============================================
   # PostgreSQL Database with Extensions
@@ -5,7 +102,7 @@ services:
   postgres:
     build:
       context: .
-      dockerfile: deployment/Dockerfile.postgres
+      dockerfile: deploy/deployment/Dockerfile.postgres
       cache_from:
         - rag_postgres:latest
     image: rag_postgres:latest
@@ -13,23 +110,23 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1.5G
+          cpus: "1.0"
+          # 1G despite ~47M resident: shared_buffers=256MB is reserved up front
+          # and faulted in lazily as rag_db grows, plus ~10MB per backend
+          # (max_connections 100) and 64MB maintenance_work_mem per HNSW rebuild.
+          memory: 1G
         reservations:
-          cpus: "0.5"
           memory: 512M
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rag_db}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
     ports:
       - "5432:5432"
     volumes:
-      # Persistent data storage
       - postgres_data:/var/lib/postgresql/data
-      # Initialization scripts (migrations)
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./deploy/migrations:/docker-entrypoint-initdb.d:ro
     networks:
       - rag_network
     healthcheck:
@@ -38,6 +135,58 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *json-logging
+
+  # ============================================
+  # Migration Runner
+  # Applies unapplied SQL migrations on every start, tracked in
+  # schema_migrations so each file runs exactly once. All files are idempotent,
+  # so re-running on a fresh volume where initdb.d applied them is a no-op.
+  # ============================================
+  migrate:
+    image: rag_postgres:latest
+    container_name: rag_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-rag_db}
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - ./deploy/migrations:/migrations:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "Waiting for postgres to accept connections..."
+        until pg_isready -h "$$PGHOST" -p "$$PGPORT" -U "$$PGUSER" >/dev/null 2>&1; do sleep 1; done
+        echo "Applying migrations..."
+        psql -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());" 2>/dev/null
+        for f in /migrations/[0-9]*.sql; do
+          [ -f "$$f" ] || continue
+          name=$$(basename "$$f")
+          applied=$$(psql -tAc "SELECT 1 FROM schema_migrations WHERE filename='$$name'" 2>/dev/null)
+          if [ "$$applied" != "1" ]; then
+            echo "  Applying $$name..."
+            psql -v ON_ERROR_STOP=1 -f "$$f"
+            psql -c "INSERT INTO schema_migrations (filename) VALUES ('$$name');"
+            echo "  Done."
+          else
+            echo "  Skipping $$name (already applied)"
+          fi
+        done
+        echo "All migrations up to date."
+    networks:
+      - rag_network
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
 
   # ============================================
   # Redis (Celery Broker/Backend)
@@ -48,14 +197,28 @@ services:
     deploy:
       resources:
         limits:
+          # 256M against a 15M peak is deliberate headroom: BGSAVE forks the
+          # process and copy-on-write can approach a second copy of the dataset.
           memory: 256M
         reservations:
-          memory: 64M
+          memory: 32M
+    # maxmemory, because nothing else bounds the broker — a directory scan
+    # enqueuing thousands of tasks would otherwise grow until the cgroup
+    # OOM-kills the broker and takes the queue with it. noeviction, not
+    # allkeys-lru: at the ceiling the correct behaviour is to fail the publish
+    # loudly, never to silently evict queued tasks.
+    command: redis-server --maxmemory 128mb --maxmemory-policy noeviction
     ports:
       - "6379:6379"
     networks:
       - rag_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
+    logging: *json-logging
 
   # ============================================
   # RAG Application
@@ -63,78 +226,41 @@ services:
   app:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
     container_name: rag_app
+    command: ["sh", "-c", "trap 'kill 0' EXIT; uvicorn app.api.app:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /app/logs/app.log"]
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1G
+          cpus: "1.0"
+          # 768M against a 392M peak — the baked-in MiniLM model plus torch
+          # resident from import. Flat: query-time embedding allocates per
+          # request, not per corpus. Parsing and bulk embedding are in workers.
+          memory: 768M
         reservations:
-          cpus: "0.5"
-          memory: 256M
+          memory: 384M
     environment:
-      # Database connection
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@postgres:5432/${POSTGRES_DB:-rag_db}
-
-      # Ollama (runs on Windows host, accessible via host.docker.internal)
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
-      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:4b}
-
-      # API Keys
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      <<: *common-env
       LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
       LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
-
-      # Graph Configuration
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
-      ENTITY_CONFIDENCE_THRESHOLD: ${ENTITY_CONFIDENCE_THRESHOLD:-0.6}
-      RELATIONSHIP_CONFIDENCE_THRESHOLD: ${RELATIONSHIP_CONFIDENCE_THRESHOLD:-0.6}
-      MAX_ENTITIES_PER_CHUNK: ${MAX_ENTITIES_PER_CHUNK:-50}
-      MAX_RELATIONSHIPS_PER_CHUNK: ${MAX_RELATIONSHIPS_PER_CHUNK:-100}
-      DEFAULT_MAX_HOPS: ${DEFAULT_MAX_HOPS:-2}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-
-      # Performance
-      BATCH_SIZE: ${BATCH_SIZE:-10}
-      ENABLE_PARALLEL_EXTRACTION: ${ENABLE_PARALLEL_EXTRACTION:-true}
-      ENABLE_ENTITY_CACHING: ${ENABLE_ENTITY_CACHING:-true}
-
       # Langfuse observability (optional — leave blank to disable)
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # Celery broker/backend + optional FE password
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
       APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-}
     ports:
       - "8000:8000"
     volumes:
-      # Mount code for development (hot reload)
       - .:/app
-      # Persistent upload storage
-      - upload_data:/app/uploads
-      # Logs
       - ./logs:/app/logs
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
     networks:
       - rag_network
     healthcheck:
@@ -144,61 +270,145 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
+    logging: *json-logging
 
   # ============================================
-  # Celery Worker (reuses app image - no rebuild needed)
+  # Celery Worker - Upload queue (single worker)
+  # Serves interactive uploads from the UI, kept separate from the ingestion
+  # queue so a long directory scan cannot starve them.
   # ============================================
-  celery_worker:
+  celery_worker_upload:
     build:
       context: .
-      dockerfile: deployment/Dockerfile
+      dockerfile: deploy/deployment/Dockerfile
       cache_from:
         - rag_with_llama:latest
     image: rag_with_llama:latest
-    container_name: rag_celery_worker
+    container_name: rag_celery_worker_upload
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1G
+          # 6.0, up from 4.0: the VM has 6 CPUs and docling was capped below it.
+          # Paired with DOCLING_NUM_THREADS 6.
+          cpus: "6.0"
+          # 3.5G, and do not lower it — this has a measured floor. A 504-page
+          # parse was OOM-killed (signal 9) on its final batch at 2.5G, RSS
+          # climbing 1589MB -> 1850MB across nine batches, with a survived run
+          # peaking at 1979MB. Anything between 2.5G and 3.5G is unmeasured;
+          # 3.5G is the only value observed to hold. celery_worker_ingestion
+          # sits at 3G only because the 6.77G VM cannot fund 3.5G twice — two
+          # simultaneous large parses remain the case that exhausts it.
+          memory: 3.5G
         reservations:
           cpus: "0.5"
-          memory: 256M
-    command: celery -A worker.celery_app worker --loglevel=info
+          memory: 512M
+    command: ["sh", "-c", "trap 'kill 0' EXIT; celery -A app.worker.celery_app worker -Q upload --loglevel=info -c 1 --max-tasks-per-child=1 2>&1 | tee -a /app/logs/celery_worker_upload.log"]
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@postgres:5432/${POSTGRES_DB:-rag_db}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
-      OLLAMA_VLM_MODEL: ${OLLAMA_VLM_MODEL:-qwen3.5:9b}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
-      USE_CELERY_FOR_EXTRACTION: ${USE_CELERY_FOR_EXTRACTION:-true}
+      <<: [*common-env, *hf-env]
     volumes:
       - .:/app
-      - upload_data:/app/uploads
       - ./logs:/app/logs
+      # docling's weights. Without this they live in the container's writable
+      # layer and every recreate re-downloads ~385MB before page 1.
+      - hf_cache:/home/appuser/.cache/huggingface
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
     networks:
       - rag_network
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   # ============================================
-  # Langfuse (Optional - LLM Observability UI)
-  # Start with: docker compose --profile observability up langfuse
-  # UI at: http://localhost:3000
+  # Celery Worker - Ingestion queue
+  # Scale with: docker compose up --scale celery_worker_ingestion=2
+  # ============================================
+  celery_worker_ingestion:
+    build:
+      context: .
+      dockerfile: deploy/deployment/Dockerfile
+      cache_from:
+        - rag_with_llama:latest
+    image: rag_with_llama:latest
+    container_name: rag_celery_worker_ingestion
+    deploy:
+      resources:
+        limits:
+          # See celery_worker_upload — same image, same docling pipeline.
+          cpus: "6.0"
+          # 3G, raised from 2.5G: that was exactly the ceiling that OOM-killed a
+          # 504-page parse on celery_worker_upload, and this worker runs the
+          # same pipeline with no evidence it would not hit the same wall.
+          memory: 3G
+        reservations:
+          memory: 512M
+    command: ["sh", "-c", "trap 'kill 0' EXIT; celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1 --max-tasks-per-child=1 2>&1 | tee -a /app/logs/celery_worker_ingestion.log"]
+    environment:
+      <<: [*common-env, *hf-env]
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      # Shared with celery_worker_upload — both would otherwise download the
+      # same ~385MB of weights into their own layer.
+      - hf_cache:/home/appuser/.cache/huggingface
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ============================================
+  # Celery Beat - Scheduler
+  # ============================================
+  celery_beat:
+    build:
+      context: .
+      dockerfile: deploy/deployment/Dockerfile
+      cache_from:
+        - rag_with_llama:latest
+    image: rag_with_llama:latest
+    container_name: rag_celery_beat
+    deploy:
+      resources:
+        limits:
+          # 192M against a 75M peak. Beat only ticks the schedule and publishes
+          # to the broker — it imports the task modules but never runs a task,
+          # so the footprint is import cost and does not grow with the queue.
+          memory: 192M
+        reservations:
+          memory: 96M
+    command: ["sh", "-c", "trap 'kill 0' EXIT; celery -A app.worker.celery_app beat --loglevel=info 2>&1 | tee -a /app/logs/celery_beat.log"]
+    environment:
+      <<: *common-env
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+    logging: *json-logging
+
+  # ============================================
+  # Langfuse (LLM Observability UI) — http://localhost:3000
   # ============================================
   langfuse:
     image: langfuse/langfuse:2.80
@@ -207,11 +417,15 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 1G
+          # 512M against a 265M high-water mark on a fresh boot with the Prisma
+          # migrations applied. Raise it if a version bump OOMKills the
+          # container during its startup migration — the one path that spikes
+          # above steady state and the one path that measurement did not cover.
+          memory: 512M
         reservations:
-          memory: 256M
+          memory: 128M
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@postgres:5432/langfuse_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/langfuse_db
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-use-a-real-secret-in-prod}
       SALT: ${LANGFUSE_SALT:-changeme-use-a-real-salt-in-prod}
       NEXTAUTH_URL: http://localhost:3000
@@ -234,9 +448,10 @@ services:
     networks:
       - rag_network
     restart: unless-stopped
+    logging: *json-logging
 
   # ============================================
-  # pgAdmin (Optional - Database Management UI)
+  # pgAdmin (dev profile) — http://localhost:5050
   # ============================================
   pgadmin:
     image: dpage/pgadmin4:8.14
@@ -244,12 +459,16 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          # 512M, unmeasured — dev-profile only, and not running when the other
+          # limits here were measured. pgadmin4 8.x serves under gunicorn with
+          # several workers and 256M is around where it gets OOM-killed
+          # mid-session. Costs nothing while the profile is off.
+          memory: 512M
         reservations:
-          memory: 64M
+          memory: 128M
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@rag.local}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:?PGADMIN_EMAIL is required}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:?PGADMIN_PASSWORD is required}
       PGADMIN_CONFIG_SERVER_MODE: 'False'
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
     ports:
@@ -261,72 +480,73 @@ services:
     networks:
       - rag_network
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     profiles:
-      - dev  # Only start with: docker-compose --profile dev up
+      - dev
 
   # ============================================
-  # Test Runner Service
+  # Test Runner (test profile)
   # ============================================
   test:
     build:
       context: .
-      dockerfile: deployment/Dockerfile.test
+      dockerfile: deploy/deployment/Dockerfile.test
     image: rag_with_llama:test
     container_name: rag_test
     deploy:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          # 1G, not 512M: Dockerfile.test builds FROM rag-base, so importing
+          # conftest pulls in the torch stack that leaves app at 392M resident —
+          # before pytest, coverage tracing and any fixture-loaded model. An OOM
+          # here surfaces as a confusing collection error, not a memory failure.
+          memory: 1G
         reservations:
-          memory: 128M
+          memory: 256M
     environment:
-      # Database connection (use service name 'postgres')
       DB_HOST: postgres
       DB_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-rag_db}
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
-
-      # API Keys
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
       LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
-
-      # LLM Configuration
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      ENTITY_EMBEDDING_MODEL: ${ENTITY_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      ENTITY_EMBEDDING_DIMENSION: 384
-
-      # Test environment
       PYTHONPATH: /app
     volumes:
-      # Mount tests directory for easier test development
       - ./tests:/app/tests
-      # Mount htmlcov for coverage reports
-      - ./htmlcov:/app/htmlcov
+      - ./tests/htmlcov:/app/tests/htmlcov
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - rag_network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     profiles:
-      - test  # Only start with: docker-compose --profile test up
+      - test
 
-# ============================================
-# Networks
-# ============================================
 networks:
   rag_network:
     driver: bridge
 
-# ============================================
-# Volumes (Persistent Data)
-# ============================================
 volumes:
   postgres_data:
     driver: local
-  upload_data:
-    driver: local
   pgadmin_data:
+    driver: local
+  # docling's layout model (heron, 171MB) and TableFormer (212MB), shared by the
+  # two workers. Downloaded on first parse, not baked into the image the way the
+  # MiniLM embedding model is. Without a volume they sit in the container's
+  # writable layer, so any --force-recreate re-downloads ~385MB before page 1.
+  hf_cache:
     driver: local

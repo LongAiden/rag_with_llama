@@ -9,18 +9,12 @@ Tests:
 5. WhitespaceNormalizer
 6. UnicodeNormalizer
 7. TextCleaningPipeline (chain of responsibility)
-8. TextCleanerFactory
 """
 import sys
 import pytest
 from pathlib import Path
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from ingestion.text_cleaning.cleaners import (
+from app.ingestion.text_cleaning.cleaners import (
     TextCleaningStrategy,
     SurrogateRemovalStrategy,
     MathNotationNormalizer,
@@ -30,7 +24,6 @@ from ingestion.text_cleaning.cleaners import (
     UnicodeNormalizer,
     TextCleaningPipeline
 )
-from ingestion.text_cleaning import TextCleanerFactory
 
 
 class TestSurrogateRemovalStrategy:
@@ -277,65 +270,3 @@ class TestTextCleaningPipeline:
         result = pipeline.clean(text)
         
         # Behavior depends on implementation
-
-
-class TestTextCleanerFactory:
-    """Tests for TextCleanerFactory."""
-
-    def test_create_default_cleaner(self):
-        """Test creating default cleaner."""
-        cleaner = TextCleanerFactory.create_default_cleaner()
-        
-        assert cleaner is not None
-        assert isinstance(cleaner, TextCleaningPipeline)
-
-    def test_create_minimal_cleaner(self):
-        """Test creating minimal cleaner."""
-        cleaner = TextCleanerFactory.create_minimal_cleaner()
-        
-        assert cleaner is not None
-        assert isinstance(cleaner, TextCleaningPipeline)
-
-    def test_create_aggressive_cleaner(self):
-        """Test creating aggressive cleaner."""
-        cleaner = TextCleanerFactory.create_aggressive_cleaner()
-        
-        assert cleaner is not None
-        assert isinstance(cleaner, TextCleaningPipeline)
-
-    def test_create_custom_cleaner(self):
-        """Test creating custom cleaner with specific options."""
-        cleaner = TextCleanerFactory.create_custom_cleaner(
-            remove_surrogates=True,
-            normalize_unicode=True,
-            normalize_math=False,
-            preserve_tables=True,
-            normalize_symbols=True,
-            normalize_whitespace=True
-        )
-        
-        assert cleaner is not None
-        
-        # Test that math is NOT normalized (as configured)
-        text = "α + β = γ"
-        result = cleaner.clean(text)
-        # Since normalize_math=False, Greek letters might be preserved
-        # (depends on Unicode normalization)
-
-    def test_default_cleaner_handles_complex_text(self):
-        """Test that default cleaner handles complex text properly."""
-        cleaner = TextCleanerFactory.create_default_cleaner()
-        
-        complex_text = """
-        "Smart quotes" and 'apostrophes'
-        α + β ≈ γ × π
-        Multiple    spaces
-        €100 and £50
-        """
-        
-        result = cleaner.clean(complex_text)
-        
-        # Should clean without errors
-        assert result is not None
-        assert isinstance(result, str)
-        assert len(result) > 0

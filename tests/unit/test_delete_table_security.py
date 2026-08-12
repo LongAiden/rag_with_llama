@@ -7,39 +7,40 @@ Covers:
 
 Uses FastAPI TestClient with mocked pipeline and config — no real DB required.
 """
-import sys
-from pathlib import Path
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
-
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 
 def _make_app():
     """Build a minimal FastAPI app with only the delete route wired up."""
     from fastapi import FastAPI, Header
     from typing import Optional
-    from api.routes.document_routes import delete_table
+    from app.api.routes.table_routes import delete_table
 
     app = FastAPI()
 
     mock_config = MagicMock()
     mock_config.pipeline = None
+    mock_config.connection_string = "postgresql://test:test@localhost/test"
 
     mock_conn = AsyncMock()
     mock_conn.fetchrow = AsyncMock(return_value={"table_exists": True, "estimated_rows": 5})
-    mock_conn.execute = AsyncMock()
-    mock_conn.close = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value=True)
+    mock_conn.execute = AsyncMock(return_value="DELETE 0")
 
     mock_vector_store = MagicMock()
     mock_vector_store.table_name = "some_other_table"
 
     mock_pipeline = MagicMock()
     mock_pipeline.vector_store = mock_vector_store
-    mock_pipeline.vector_store._get_connection = AsyncMock(return_value=mock_conn)
+
+    @asynccontextmanager
+    async def mock_connection():
+        yield mock_conn
+
+    mock_pipeline.vector_store.connection = mock_connection
 
     async def mock_get_pipeline(table_name):
         return mock_pipeline
@@ -49,12 +50,23 @@ def _make_app():
         table_name: str,
         x_app_password: Optional[str] = Header(default=None),
     ):
-        return await delete_table(
-            table_name=table_name,
-            x_app_password=x_app_password,
-            config=mock_config,
-            get_pipeline=mock_get_pipeline,
-        )
+        with patch("app.api.routes.table_deletion.IngestionRepository") as mock_ing_repo_cls, \
+             patch("app.api.routes.table_deletion.DomainRepository") as mock_dom_repo_cls:
+            mock_ing_repo = AsyncMock()
+            mock_ing_repo.delete_documents_for_table = AsyncMock(return_value=[])
+            mock_ing_repo_cls.return_value = mock_ing_repo
+
+            mock_dom_repo = AsyncMock()
+            mock_dom_repo.delete_domain = AsyncMock(return_value=False)
+            mock_dom_repo_cls.return_value = mock_dom_repo
+
+            return await delete_table(
+                table_name=table_name,
+                x_app_password=x_app_password,
+                config=mock_config,
+                get_pipeline=mock_get_pipeline,
+                forget_pipeline=None,
+            )
 
     return app
 

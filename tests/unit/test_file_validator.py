@@ -15,14 +15,9 @@ import sys
 import pytest
 from pathlib import Path
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 # Import directly from modules to avoid cascade through __init__.py
-from ingestion.validation.file_validator import FileValidator
-from models.models import SupportedFileType, FileValidationConfig
+from app.ingestion.validation.file_validator import FileValidator
+from app.models.schemas import SupportedFileType, FileValidationConfig
 
 
 class TestFileExtensionValidation:
@@ -167,7 +162,7 @@ class TestFakePdfDetection:
         assert result.file_type == SupportedFileType.PDF
         # File is readable, so it passes basic validation
         assert result.is_valid is True
-        # Note: Full PDF validation happens in PDFProcessor
+        # Note: Full PDF parsing happens in the docling-based PDF parser
 
     def test_empty_pdf_file(self, temp_dir):
         """Test handling of empty PDF file."""
