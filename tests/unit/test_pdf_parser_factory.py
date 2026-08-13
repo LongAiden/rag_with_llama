@@ -122,7 +122,10 @@ class TestTuningIsWiredThrough:
 
         # Unchanged from the values that were hardcoded before they were exposed.
         assert settings.docling_num_threads == 2
-        assert settings.docling_page_batch_size == 50
+        # 40, lowered from 50 after a 702-page PDF was OOM-killed: docling holds
+        # a rendered image for every page in the batch until it is released, so
+        # this is the parse's working set (~5.2MB/page at images_scale 2.0).
+        assert settings.docling_page_batch_size == 40
         # Measured on this stack: concurrency above 1 is slower, not faster,
         # because Ollama is local and serializes on one GPU.
         assert settings.vlm_concurrency == 1

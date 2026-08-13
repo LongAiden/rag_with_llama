@@ -1,3 +1,4 @@
+import gc
 import re
 import time
 import logging
@@ -57,7 +58,13 @@ _DEFAULT_MIN_IMAGE_SHORT_PT = 107
 # images_scale, which is the whole point. Leaving this at a fixed 8px made the
 # floor 80pt at scale 0.6 but 99pt at scale 2.0 and silently dropped 9 figures.
 _DEFAULT_CROP_PADDING_PT = 13
-_DOCLING_PAGE_BATCH_SIZE = 50
+# Docling keeps a rendered image for every page in the batch until the batch is
+# released, so this is the parse's working set: ~5.2MB/page at images_scale 2.0,
+# i.e. ~208MB at 40 and ~260MB at 50. Lowered to 40 after a 702-page PDF was
+# OOM-killed; it is the smaller half of that fix, _release_freed_memory() being
+# the larger. Raising it costs memory linearly and saves only the per-convert
+# overhead of re-opening the PDF.
+_DOCLING_PAGE_BATCH_SIZE = 40
 # TableFormer structure decoder: "accurate" or "fast". docling time on a 504-page
 # book is not uniform — pages 451-500 (the dense multi-column index, which the
 # layout model classifies as tables) took 554.8s at 11.10 s/page against 1.47
@@ -100,6 +107,92 @@ def _rss_mb() -> float:
     except Exception:
         pass
     return 0.0
+
+
+class _PeakRssSampler:
+    """Background sampler for the peak RSS *inside* `convert()`.
+
+    Sampling only between batches misses the number that matters. A 702-page
+    parse was OOM-killed 17s into its eighth `convert()` while the last logged
+    RSS — taken after the seventh returned — read 2759MB against a 3584MB
+    limit, so every recorded peak in the parse history is a lower bound taken
+    at a local minimum.
+
+    A daemon thread, so a crash in the parse can never leave it holding the
+    process open.
+    """
+
+    def __init__(self, interval: float = 0.5):
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.peak = 0.0
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self.peak = max(self.peak, _rss_mb())
+
+    def __enter__(self) -> "_PeakRssSampler":
+        self.peak = _rss_mb()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval * 4)
+        self.peak = max(self.peak, _rss_mb())
+        return None
+
+
+def _resolve_malloc_trim():
+    """Return libc's `malloc_trim`, or None where there is no glibc.
+
+    Resolved once and cached — including the failure — because this is called
+    once per page batch and `CDLL` is not free.
+    """
+    global _MALLOC_TRIM
+    if _MALLOC_TRIM is not _UNRESOLVED:
+        return _MALLOC_TRIM
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        trim = libc.malloc_trim
+        trim.argtypes = [ctypes.c_size_t]
+        trim.restype = ctypes.c_int
+        _MALLOC_TRIM = trim
+    except Exception:
+        # macOS and musl have no malloc_trim. Their allocators also do not have
+        # the per-thread arena behaviour this exists to counter, so a no-op is
+        # the correct outcome and not a degradation.
+        _MALLOC_TRIM = None
+    return _MALLOC_TRIM
+
+
+_UNRESOLVED = object()
+_MALLOC_TRIM = _UNRESOLVED
+
+
+def _release_freed_memory() -> None:
+    """Hand a batch's freed heap back to the OS. Never raises.
+
+    `del doc` drops the last Python reference to a `DoclingDocument` and its 50
+    rendered page images, but glibc keeps the blocks in its per-thread arenas:
+    measured RSS across the first five batches of a 702-page parse stepped
+    +357, +321, +239, +314MB and never fell, while
+    `test_pdf_parser_streaming.py::test_no_document_survives_the_parse` proves
+    nothing was actually retained. Milliseconds against a ~75s convert.
+    """
+    gc.collect()
+    trim = _resolve_malloc_trim()
+    if trim is None:
+        return
+    try:
+        trim(0)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("malloc_trim failed; continuing", exc_info=True)
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
@@ -922,9 +1015,16 @@ class GeminiDoclingParser(PDFParserBase):
         """Parse a PDF to markdown, one page batch at a time, VLM work pipelined.
 
         Each batch is converted, built and released before the next `convert()`
-        runs, so peak memory is O(batch size) rather than O(total pages): the
-        `DoclingDocument`s — and the rendered page images they carry — are never
-        all alive at once.
+        runs, so only one `DoclingDocument` — and only one batch of the rendered
+        page images it carries — is ever alive.
+
+        That bounds the *working set* at O(batch size). It does not by itself
+        bound peak RSS: freeing the batch returns the blocks to glibc, not to
+        the kernel, so measured RSS climbed ~250-350MB per batch across a
+        702-page parse until the cgroup killed it. `_release_freed_memory()`
+        after each `del doc` is what makes the peak flat in total page count;
+        without it this loop is O(total pages) in RSS despite being O(batch
+        size) in live objects.
 
         The *join* of a batch's VLM futures is deferred by one batch, so those
         calls decode while docling converts the next batch instead of after it:
@@ -965,16 +1065,22 @@ class GeminiDoclingParser(PDFParserBase):
 
         docling_seconds = 0.0
         assembly_seconds = 0.0
-        peak_rss = _rss_mb()
+        # Sampled between batches. Kept alongside the background sampler's peak
+        # because every historical measurement in docs/ is this number, and
+        # mixing the two would make the series incomparable.
+        post_convert_rss = _rss_mb()
 
         # The batch whose VLM futures are in flight. Emitting it is deferred until
         # after the NEXT convert() so the VLM decode overlaps docling's CPU work
         # instead of following it. Depth stays 1: per batch, convert is ~68s
         # against ~26s of VLM, so one batch of lag already absorbs all of it.
         pending: Optional[list] = None
+        peak_rss = post_convert_rss
 
         try:
-            with ThreadPoolExecutor(max_workers=self._vlm_concurrency) as executor:
+            with _PeakRssSampler() as rss_sampler, ThreadPoolExecutor(
+                max_workers=self._vlm_concurrency
+            ) as executor:
                 for batch_start in range(1, total_pages + 1, self._page_batch_size):
                     batch_end = min(batch_start + self._page_batch_size - 1, total_pages)
                     batch_pages = batch_end - batch_start + 1
@@ -992,7 +1098,7 @@ class GeminiDoclingParser(PDFParserBase):
                             page_items[item.prov[0].page_no].append(item)
 
                     rss = _rss_mb()
-                    peak_rss = max(peak_rss, rss)
+                    post_convert_rss = max(post_convert_rss, rss)
                     logger.info(
                         f"Converted pages {batch_start}-{batch_end}: "
                         f"elapsed={convert_elapsed:.1f}s "
@@ -1018,12 +1124,23 @@ class GeminiDoclingParser(PDFParserBase):
                             continue
                     assembly_seconds += time.monotonic() - assemble_started
 
-                    # Release the batch before converting the next one. This is
-                    # what keeps peak memory flat in total page count; dropping
-                    # it is what made a 504-page PDF OOM the worker. It must also
-                    # happen BEFORE the emit below, or two batches' docs overlap.
+                    # Release the batch before converting the next one; dropping
+                    # this is what made a 504-page PDF OOM the worker. It must
+                    # also happen BEFORE the emit below, or two batches' docs
+                    # overlap.
+                    #
+                    # `del` alone only bounds the working set — the freed blocks
+                    # stay in glibc's arenas, which is how a 702-page PDF still
+                    # climbed ~250-350MB per batch to its own OOM kill. The trim
+                    # is what makes peak RSS, not just live objects, flat in
+                    # total page count.
                     del doc, page_items
-                    peak_rss = max(peak_rss, _rss_mb())
+                    _release_freed_memory()
+                    freed_rss = _rss_mb()
+                    logger.info(
+                        f"Released batch {batch_start}-{batch_end}: "
+                        f"rss={freed_rss:.0f}MB (freed {rss - freed_rss:.0f}MB)"
+                    )
 
                     # Emit the previous batch. Its futures resolved during the
                     # convert() above, so these joins are nearly free.
@@ -1031,6 +1148,9 @@ class GeminiDoclingParser(PDFParserBase):
                         emit_started = time.monotonic()
                         self._emit_batch(pending, pages_md, out_file, total_pages)
                         assembly_seconds += time.monotonic() - emit_started
+                        logger.info(
+                            f"Emitted batch before {batch_start}: rss={_rss_mb():.0f}MB"
+                        )
 
                     pending = built
 
@@ -1043,7 +1163,8 @@ class GeminiDoclingParser(PDFParserBase):
                     self._emit_batch(pending, pages_md, out_file, total_pages)
                     assembly_seconds += time.monotonic() - emit_started
                     pending = None
-                peak_rss = max(peak_rss, _rss_mb())
+                post_convert_rss = max(post_convert_rss, _rss_mb())
+            peak_rss = max(rss_sampler.peak, post_convert_rss)
         finally:
             if out_file:
                 out_file.close()
@@ -1066,7 +1187,8 @@ class GeminiDoclingParser(PDFParserBase):
             f"assembly={assembly_seconds:.0f}s ({_pct(assembly_seconds):.0f}%) "
             f"vlm_wait={vlm_seconds:.0f}s vlm_blocked={vlm_blocked:.0f}s "
             f"vlm_calls={vlm_calls} "
-            f"vlm_failures={vlm_failures} peak_rss={peak_rss:.0f}MB"
+            f"vlm_failures={vlm_failures} peak_rss={peak_rss:.0f}MB "
+            f"post_convert_rss={post_convert_rss:.0f}MB"
         )
         if vlm_failures:
             model = getattr(self, "_vlm_model", None) or self._gemini_model

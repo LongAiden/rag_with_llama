@@ -191,6 +191,301 @@ Two things are load-bearing in the worker:
 
 See `src/app/worker/ingestion_tasks.py:_run()` and `build_ingestion_chain()`.
 
+### 4.6 Parsing stage
+
+The parsing stage converts raw files (PDF, DOCX, TXT) into normalized markdown. It is the first stage of the ingestion pipeline: `registered → [parse] → parsed`.
+
+#### 4.6.1 Entry point
+
+`ChunkEmbeddingPipeline.parse_file()` (`src/app/ingestion/embedding/pipeline.py:108-174`) is a static method — it needs no embedding model, so the worker calls it on the class. The Celery task `_parse_document()` (`ingestion_tasks.py:184-212`) wraps it in `_run_stage()`, which claims the document row and records failures.
+
+The synchronous `parse_pdf()` call is dispatched via `asyncio.to_thread()` (`pipeline.py:149`) so it does not block the worker's event loop or its asyncpg pool — a 504-page PDF can run for 13+ minutes.
+
+#### 4.6.2 Parser factory
+
+`create_pdf_parser(backend, settings)` (`src/app/ingestion/processors/pdf_parser_factory.py`) returns one of two implementations of `PDFParserBase`:
+
+| Backend | Class | VLM source |
+|---|---|---|
+| `ollama` | `OllamaPDFParser` | Local Ollama (`qwen3.5:0.8b` by default) |
+| `gemini-docling` | `GeminiDoclingParser` | Google Gemini Vision API |
+
+Both share the same base class and the same streaming `parse_pdf()` implementation. The subclass only overrides `_call_vlm()` (Gemini SDK vs. Ollama HTTP) and `get_backend_name()`.
+
+For DOCX and TXT, `get_processor_for_file()` (`src/app/ingestion/processors/processor_factory.py`) returns a simpler text extractor — no VLM, no batching, just raw text extraction.
+
+#### 4.6.3 PDF parsing: batched convert + VLM pipeline
+
+`GeminiDoclingParser.parse_pdf()` (`src/app/ingestion/processors/gemini_docling_parser.py:921-1080`) processes the PDF in **50-page batches** (configurable via `DOCLING_PAGE_BATCH_SIZE`):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  parse_pdf() main loop                                          │
+│                                                                 │
+│  1. Count total pages (pypdfium2)                               │
+│  2. Build DocumentConverter (docling layout + TableFormer)      │
+│  3. Create ThreadPoolExecutor(max_workers=VLM_CONCURRENCY)      │
+│                                                                 │
+│  4. For each batch of 50 pages:                                 │
+│     ┌───────────────────────────────────────────────────────┐   │
+│     │  a. convert(batch_start, batch_end)                   │   │
+│     │     → Docling runs layout detection + TableFormer     │   │
+│     │     → Renders page images at 144 DPI (images_scale=2) │   │
+│     │     → Returns DoclingDocument with items + images     │   │
+│     │                                                       │   │
+│     │  b. Group items by page_no (prov[0].page_no)          │   │
+│     │                                                       │   │
+│     │  c. For each page in batch:                           │   │
+│     │     → _build_page() walks items, submits VLM futures  │   │
+│     │     → Collects (ordered, vlm_tasks) tuples            │   │
+│     │                                                       │   │
+│     │  d. del doc, page_items  ← release memory             │   │
+│     │                                                       │   │
+│     │  e. If previous batch pending:                        │   │
+│     │     → _emit_batch() joins VLM futures, writes output  │   │
+│     │                                                       │   │
+│     │  f. pending = built  ← defer this batch's emit        │   │
+│     ───────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  5. Emit final batch (unavoidable serial tail)                  │
+│  6. Return concatenated markdown                                │
+└─────────────────────────────────────────────────────────────────
+```
+
+**VLM/convert pipelining (depth 1)**: the join of batch N's VLM futures is deferred until *after* batch N+1's `convert()` starts. Since VLM calls (~3s each) are faster than convert (~75s per batch), most futures are already resolved by the time emit runs. The `vlm_blocked` metric in the summary line proves the overlap — it collapsed from an implicit 281s to a measured 0s on the 504-page NLTK.pdf.
+
+**Memory invariant**: only one `DoclingDocument` is ever alive at a time. `del doc, page_items` happens *before* the emit, so two batches' docs never overlap. Page images are ~5.2-5.8 MB each at 144 DPI → ~208 MB per 40-page batch.
+
+That bounds the **working set**, not peak RSS: freeing a batch returns its blocks to glibc, not to the kernel. `_release_freed_memory()` (`gc.collect()` + `malloc_trim(0)`) runs immediately after `del doc` for exactly that reason — without it, measured RSS climbed ~250-350 MB per batch and OOM-killed a 702-page parse. See §15.12.
+
+#### 4.6.4 Per-page assembly: _build_page and _finalize_page
+
+**`_build_page(page_no, items, doc, executor)`** (`gemini_docling_parser.py:654-843`) walks the page's items and builds markdown fragments:
+
+| Item Type | Handling |
+|---|---|
+| **PictureItem** | Crop image from page render (`_expand_and_crop`) → submit to VLM via `executor.submit(_call_vlm, crop, prompt)` → collect future in `vlm_tasks` |
+| **TableItem** (simple) | `item.export_to_markdown(doc)` → docling's TableFormer output |
+| **TableItem** (complex, if `VLM_TABLES=true`) | Crop → VLM (disabled by default; 0.8B model hallucinated table content) |
+| **SectionHeaderItem** | Convert to `#`, `##`, `###` based on bbox height |
+| **TextItem** | Dispatch on `item.label`: code → fenced block, list_item → bullet/number, else → plain text |
+
+Returns `(ordered, vlm_tasks)` where `ordered` holds `(col, y, x, markdown_string)` tuples and `vlm_tasks` holds `(col, y, x, future, kind, caption)` tuples.
+
+**Key design**: VLM crops are cut eagerly into independent PIL images (`_expand_and_crop`, `:629-652`), so futures hold no reference to `doc`. This allows `del doc` before joining futures.
+
+**`_finalize_page(page_no, ordered, vlm_tasks)`** (`:845-874`) joins the VLM futures, wraps figures in `<figure>...</figure>` and tables in `<table>...</table>`, sorts by `(col, y, x)` (column-first, then top-to-bottom, left-to-right), joins with `\n\n`, and prefixes with `[PAGE:N]`.
+
+**`_process_page`** is kept as a thin wrapper over both, so the synchronous `executor=None` path and its callers (tests) are unchanged.
+
+#### 4.6.5 VLM call details
+
+`_call_vlm(pil_img, prompt)` (`:570-576`):
+1. Rate limiter waits if RPM limit reached (default 10 calls/min)
+2. `_call_gemini()` sends `[pil_img, prompt]` to the VLM backend
+3. Retries 3 times on 429/quota errors (60s backoff)
+4. Post-processes raw output:
+   - `_strip_code_fences()` — remove ` ```markdown ` wrappers
+   - `_strip_html_wrappers()` — unwrap `<p>`, `<div>`, `<span>`
+   - `_strip_stray_headers()` — remove stray `#` outside figures
+   - `_normalize_tables_in_markdown()` — fix table formatting
+
+**Ollama-specific tuning** (from F-series findings):
+- `OLLAMA_VLM_THINK=false`: qwen3.5 is a reasoning model; Ollama defaults thinking on, which added 85-87s per call of discarded reasoning tokens.
+- `OLLAMA_VLM_TEMPERATURE=0.0`, `OLLAMA_VLM_NUM_PREDICT=384`: bounds output length; without it the model wandered into 3000+ token hallucinations.
+- `VLM_CONCURRENCY=1`: local Ollama serializes on one GPU — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
+- `VLM_TABLES=false`: 0.8B model cannot do table OCR; all tables go to docling's TableFormer.
+- `VLM_MIN_IMAGE_SHORT_PX=64`: skips pictures whose short side is under 64px rendered pixels.
+
+#### 4.6.6 Docling converter configuration
+
+`_build_converter()` (`:501-523`) configures the `DocumentConverter`:
+
+| Setting | Value | Source |
+|---|---|---|
+| `do_ocr` | `False` | hardcoded |
+| `do_table_structure` | `True` | hardcoded |
+| `do_cell_matching` | `True` | hardcoded |
+| `mode` (TableFormer) | `fast` | `DOCLING_TABLEFORMER_MODE` |
+| `num_threads` | 6 | `DOCLING_NUM_THREADS` |
+| `device` | `AUTO` (CPU in Docker) | hardcoded |
+| `generate_page_images` | `True` | hardcoded |
+| `generate_picture_images` | `True` | hardcoded |
+| `images_scale` | 2.0 (144 DPI) | `VLM_IMAGES_SCALE` |
+
+TableFormer `fast` cuts the index region (pages 451-500 of NLTK.pdf) from 11.10 s/page to 2.42 s/page (-76%) with structurally identical output.
+
+#### 4.6.7 Image size gates
+
+Two gates filter which pictures go to the VLM:
+
+- **`min_image_px`** (default 150): skips pictures where *both* dimensions are under 150px. Catches square icons.
+- **`min_image_short_px`** (default 64): skips pictures whose *short side* is under 64px. Catches thin strips (rules, equation lines, header bands) that the both-dimensions rule missed — 60% of VLM calls in a 504-page run.
+
+Both are expressed in rendered pixels. The underlying constants are in points (`_DEFAULT_MIN_IMAGE_SHORT_PT=107`, `_DEFAULT_CROP_PADDING_PT=13`) so they keep their meaning when `images_scale` changes.
+
+#### 4.6.8 Instrumentation
+
+`parse_pdf` logs a single summary line:
+
+```
+parse_pdf summary: NLTK.pdf pages=504 total=808s docling=804s (99%)
+                   assembly=3s (0%) vlm_wait=333s vlm_blocked=0s
+                   vlm_calls=86 vlm_failures=0 peak_rss=2886MB
+```
+
+| Metric | Meaning |
+|---|---|
+| `total` | Wall time of `parse_pdf` |
+| `docling` | Time inside `converter.convert()` calls |
+| `assembly` | Time inside `_build_page` + `_emit_batch` (excluding convert) |
+| `vlm_wait` | Total time spent inside VLM calls on pool threads (unchanged by pipelining) |
+| `vlm_blocked` | How much of `vlm_wait` the assembly loop actually waited for (proves overlap) |
+| `vlm_calls` / `vlm_failures` | VLM call count and failure count |
+| `peak_rss` | Peak resident set size in MB (from `/proc/self/status`) |
+
+Per-batch lines log `elapsed`, `rate` (s/page), and `rss`. Per-page lines (when elapsed > 1s) log cumulative `vlm_wait` and `vlm_blocked`.
+
+VLM counters are guarded by `_vlm_stats_lock` because they are written from `VLM_CONCURRENCY` pool threads. The `vlm_blocked` wait is timed **outside** the lock — holding it across `future.result()` would deadlock (the pool thread takes the same lock in `_record_vlm_call`).
+
+#### 4.6.9 Output
+
+The return value is the concatenated markdown with `[PAGE:N]` markers. It is:
+1. Written to `data/parsed/<document_id>_<name>.md` (if `PERSIST_INGESTION_ARTIFACTS=true`)
+2. Saved to the `document_parsed` table via `repo.transition_to_parsed()`
+3. Passed to the chunk stage
+
+#### 4.6.10 Key files
+
+| File | Responsibility |
+|---|---|
+| `src/app/ingestion/processors/pdf_parser_factory.py` | Backend factory (`ollama` vs `gemini-docling`) |
+| `src/app/ingestion/processors/gemini_docling_parser.py` | Core PDF parser: `parse_pdf`, `_build_page`, `_finalize_page`, VLM calls |
+| `src/app/ingestion/processors/ollama_pdf_parser.py` | Ollama subclass (overrides `_call_vlm` only) |
+| `src/app/ingestion/processors/pdf_parser_base.py` | `PDFParserBase` abstract contract |
+| `src/app/ingestion/processors/prompts.py` | VLM prompts (`_VLM_IMAGE_PROMPT`, `_VLM_TABLE_PROMPT`) |
+| `src/app/ingestion/processors/processor_factory.py` | Non-PDF file processor factory |
+| `src/app/ingestion/embedding/pipeline.py` | `parse_file()` — orchestrates parser creation and dispatch |
+
+### 4.7 Chunking stage
+
+The chunking stage transforms parsed markdown into semantic chunks suitable for embedding. It is the middle stage of the ingestion pipeline: `parsed → [chunk] → chunked`.
+
+#### 4.6.1 Entry point
+
+`ChunkEmbeddingPipeline.chunk_parsed_document()` (`src/app/ingestion/embedding/pipeline.py:176-262`) is a static method — it needs no embedding model, so the worker calls it on the class. It dispatches on `file_type`:
+
+- **PDF**: markdown-aware chunking via `chunk_markdown()`, then enriches each chunk with page number and section path from a single forward scan of the document.
+- **DOCX / TXT**: generic chunker via `get_chunker()`, with adaptive strategy selection based on document size.
+
+#### 4.6.2 Chunker strategies
+
+Four strategies are available via `CHUNKER_TYPE` env var or the `chunker_type` parameter:
+
+| Strategy | Key | Library | Use case |
+|---|---|---|---|
+| **Markdown** | `markdown` (default) | `chonkie.RecursiveChunker.from_recipe("markdown")` | PDF output. Splits on headings, lists, code blocks. |
+| **Recursive** | `recursive` | `chonkie.RecursiveChunker` | Large documents (>100KB). Fast, respects text boundaries. |
+| **Token** | `token` | `chonkie.TokenChunker` | Fastest. Simple token-based splitting. |
+| **Semantic** | `semantic` | `chonkie.SemanticChunker` | Highest quality, AI-powered. Slow; auto-downgraded to recursive for large docs. |
+
+**Adaptive selection**: when `text_length > 100_000` chars and the requested strategy is `semantic`, the factory silently switches to `recursive` — semantic chunking loads an embedding model and is prohibitively slow on large documents.
+
+**Chunker caching**: all chunkers are cached in a module-level `_CHUNKER_CACHE` dict keyed by strategy + parameters. This matters for `SemanticChunker`, which loads a `SentenceTransformer` model on first use.
+
+#### 4.6.3 PDF-specific enrichment
+
+For PDFs, after chunking, each chunk is enriched with structural metadata from a single forward scan (`_MarkdownStructure`, `pipeline.py:26-67`):
+
+1. **Page number**: `_MarkdownStructure.page_at(start_index)` binary-searches the `[Page N]` markers to find which page the chunk starts on.
+2. **Section path**: `_MarkdownStructure.section_at(start_index)` tracks the heading hierarchy (`#`, `##`, `###`) and returns a bracketed path like `[Introduction]. [Background]. [Methods]`. The section path is prepended to the chunk text (`f"{section_path} - {chunk.text}"`) so the embedding captures structural context.
+3. **Full page content**: `_extract_page_content(markdown, page_number)` extracts the full text of the chunk's source page. Stored in chunk metadata as `page_content` — used by the query pipeline for optional full-page context retrieval.
+
+The `_MarkdownStructure` scan is linear: one forward pass for page markers and headings, then O(log n) binary search per chunk. This avoids the quadratic cost of re-scanning the document prefix for each chunk.
+
+#### 4.6.4 Non-PDF chunking
+
+For DOCX and TXT files, the chunker is selected by `CHUNKER_TYPE` (default `markdown`). Page numbers come from `page_mapping` — a list of `(start_pos, end_pos, page_num)` tuples produced by the parser — via `get_page_number_for_position()`. Section paths are empty for non-PDF files.
+
+#### 4.6.5 Text cleaning pipeline
+
+Before embedding, each chunk's text passes through `TextCleaningPipeline` (`src/app/ingestion/text_cleaning/cleaners.py:208-294`), a chain-of-responsibility of six strategies applied in order:
+
+1. **SurrogateRemovalStrategy** — strips Unicode surrogate pairs (U+D800–U+DFFF) that cause UTF-8 encoding errors.
+2. **UnicodeNormalizer** — NFKC normalization (compatibility composition).
+3. **MathNotationNormalizer** — replaces Greek letters, math operators, superscripts, and arrows with ASCII equivalents (e.g., `α` → `alpha`, `×` → ` * `, `²` → `^2`).
+4. **TableStructurePreserver** — normalizes box-drawing characters to ASCII table syntax (`│` → ` | `, `─` → `-`).
+5. **SpecialSymbolNormalizer** — replaces smart quotes, dashes, ellipsis, bullets, and currency symbols with ASCII equivalents.
+6. **WhitespaceNormalizer** — collapses multiple spaces, normalizes newlines (max 2 consecutive), strips trailing whitespace.
+
+Each strategy is isolated: if one fails, the pipeline logs and continues with the next. The pipeline is applied per-chunk, not per-document.
+
+#### 4.6.6 Embedding generation
+
+`EmbeddingGenerator` (`src/app/ingestion/embedding/generator.py`) wraps `SentenceTransformer`:
+
+- Model: `all-MiniLM-L6-v2` (384 dimensions), loaded once on first use.
+- Batch encoding: chunks are encoded in batches of 32 for efficiency.
+- Defensive input handling: `None` → empty string, non-strings → `str()`, empty strings → single space, bytes → UTF-8 decode.
+- Per-batch fallback: if a batch fails, individual texts are encoded one-by-one; failures produce a zero vector.
+
+The embedding call is wrapped in `asyncio.to_thread()` (`pipeline.py:328-336`) to keep it off the worker's event loop.
+
+#### 4.6.7 Storage
+
+`VectorStore` (`src/app/ingestion/embedding/vector_store.py`) inserts chunks into a pgvector table:
+
+```sql
+CREATE TABLE IF NOT EXISTS <table_name> (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    embedding vector(384),
+    metadata JSONB,
+    doc_name TEXT,
+    entity_ids UUID[] DEFAULT ARRAY[]::UUID[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+- `id`: UUID per chunk.
+- `document_id`: FK to the parent document.
+- `text`: cleaned chunk text (with section path prepended for PDFs).
+- `embedding`: 384-dim vector from `all-MiniLM-L6-v2`.
+- `metadata`: JSONB blob carrying `chunk_index`, `token_count`, `start_index`, `end_index`, `page_number`, `section_path`, `page_content`, `chunk_size`, `similarity_threshold`, `embedding_model`, `embedding_dimension`, `filename`, `file_type`, `file_size`, `parser_used`, `doc_name`.
+- `doc_name`: denormalized from `documents.doc_name` so search results are attributable without a join.
+- `entity_ids`: reserved for the knowledge graph feature (unwired).
+
+Indexes: `embedding_idx` (HNSW, cosine), `document_id_idx`, `doc_name_idx`.
+
+Insert is batched: 100 chunks per `INSERT` statement (`vector_store.py`).
+
+#### 4.6.8 On-disk artifacts
+
+If `PERSIST_INGESTION_ARTIFACTS=true` (default), chunks are also written to disk for inspection:
+
+```
+data/chunks/<document_id>_<stem>/
+    0000.md, 0001.md, ...    one file per chunk, text only
+    index.json               per-chunk metadata (page_number, section_path, token_count, etc.)
+```
+
+Written by `write_chunk_artifacts()` (`src/app/ingestion/artifacts.py:131-194`). The directory is cleared before each write so a retry producing fewer chunks cannot leave a stale tail. `index.json` deliberately omits `full_content` — it holds the chunk's entire source page, so every chunk on a page would repeat that page into the index.
+
+Artifact writes never raise: an `OSError` is logged and skipped, because a debugging aid must not fail an ingestion that otherwise succeeded.
+
+#### 4.6.9 Key files
+
+| File | Responsibility |
+|---|---|
+| `src/app/ingestion/chunking/chunker_factory.py` | Chunker strategy factory, adaptive selection, `chunk_markdown()` |
+| `src/app/ingestion/embedding/pipeline.py` | `chunk_parsed_document()` — orchestration, page/section enrichment |
+| `src/app/ingestion/text_cleaning/cleaners.py` | Six-stage text cleaning pipeline |
+| `src/app/ingestion/embedding/generator.py` | `SentenceTransformer` wrapper, batch encoding |
+| `src/app/ingestion/embedding/vector_store.py` | pgvector CRUD, table initialization, batch insert |
+| `src/app/ingestion/artifacts.py` | On-disk chunk dumps under `data/chunks/` |
+| `src/app/ingestion/processors/page_utils.py` | `get_page_number_for_position()` for non-PDF files |
+
 ---
 
 ## 5. Query Pipeline
@@ -393,8 +688,8 @@ Previously, routes were declared twice and only the wrapper versions were mounte
 
 ### 10.3 Pre-existing test failures
 
-Running `tests/unit` on `refactor/document-ingestion` gives **9 failures / 589
-passed** (re-counted 2026-08-12), all pre-existing and unrelated to current work:
+Running `tests/unit` on `refactor/document-ingestion` gives **9 failures / 605
+passed** (re-counted 2026-08-14), all pre-existing and unrelated to current work:
 
 - `tests/unit/test_chunker_factory.py` (5, chonkie API drift — the local chonkie is newer than the pinned one)
 - `tests/unit/test_pdf_parser_factory.py` (2, still asserts `min_image_short_px`, which the parser refactor renamed to `min_image_short_pt` and joined with `images_scale`/`tableformer_mode`)
@@ -534,6 +829,13 @@ See `docs/20260802_project_refactoring.md`, `docs/20260802_architecture_review_f
 > `parse_pdf` now **streams**: each batch is converted, assembled (including VLM)
 > and released before the next `convert()` runs, which is what actually makes peak
 > memory O(batch size). See §15.7.
+>
+> **Corrected again 2026-08-14.** Streaming bounds the *working set*, not peak
+> RSS. Releasing a batch returns its blocks to glibc, not to the kernel, so peak
+> RSS still grew ~250-350 MB per batch and OOM-killed a 702-page parse. "Flat
+> regardless of document size" is only true with `_release_freed_memory()` and
+> `MALLOC_ARENA_MAX=2` — see §15.12, and treat this row's memory numbers as
+> superseded.
 
 Both PDF parsers (`GeminiDoclingParser` and `OllamaPDFParser`) now use **page-batched conversion** to prevent OOM kills on large documents:
 
@@ -615,7 +917,8 @@ The query pipeline now supports two selectable modes:
 - `INGESTION_MAX_ATTEMPTS`: Default 2 (used by `reset_stale_claims()`)
 - `INGESTION_CLAIM_TIMEOUT_MINUTES`: **180** in `docker-compose.yml` (`AppSettings` default is still 30). Must exceed the worst-case parse: a 500-page PDF runs ~60 minutes, and at 30 the 6-hourly recovery sweep declared live parses stale, re-dispatched a duplicate conversion, and consumed the retry budget of a document that never failed.
 - `DOCLING_NUM_THREADS`: Default **2**. Docling's `AcceleratorOptions` thread count. Raising it does nothing unless the container's `cpus:` limit rises too, and vice versa.
-- `DOCLING_PAGE_BATCH_SIZE`: Default **50**. Pages per `convert()` call; sets peak parse memory now that batches are released as they finish.
+- `DOCLING_PAGE_BATCH_SIZE`: Default **40** (was 50). Pages per `convert()` call. Docling keeps a rendered image for *every* page in the batch until the batch is released, so this sets the parse's working set — ~208 MB at 40, ~260 MB at 50. It does **not** by itself bound peak RSS; see `MALLOC_ARENA_MAX` below and §15.12.
+- `MALLOC_ARENA_MAX` / `MALLOC_TRIM_THRESHOLD_`: **2** / **131072** on all four app-image services. glibc's default of 8×NCPU arenas lets docling's threads strand freed pages the process never reuses, which is what made peak RSS grow with total page count rather than batch size. No effect on macOS/musl.
 - `VLM_CONCURRENCY`: Default **1**. Parallel VLM calls *within a single parse*. With Ollama on a separate host these are network waits, so higher values can pay off; against a local Ollama they serialize on one GPU (§15.8). Note it does not bound concurrency **across** workers — `celery_worker_upload` and `celery_worker_ingestion` are separate processes and can each be parsing a document.
 - `OLLAMA_VLM_TEMPERATURE` / `OLLAMA_VLM_NUM_PREDICT`: Default **0.0** / **384**. VLM latency is pure decode at ~35 tok/s, so elapsed *is* the output length, and Ollama's defaults leave it unbounded (§15.9).
 - `VLM_MIN_IMAGE_SHORT_PX`: Default **64**. Skips pictures whose short side is under this. The older `min_image_px=150` rule needs *both* dimensions small, so it only caught square icons and let every thin strip through.
@@ -892,6 +1195,11 @@ this is recorded rather than acted on — but it is the number to watch if a lar
 PDF appears. A rise of ~1 GB would mean a `DoclingDocument` is being retained
 instead; `tests/unit/test_pdf_parser_streaming.py`'s weakref check guards that.
 
+> **2026-08-14: a larger PDF appeared and this was the number.** A 702-page book
+> was OOM-killed at batch 8 of 15. The weakref check held — nothing was retained —
+> so the growth was allocator-level, which neither this paragraph nor the test
+> anticipated. See §15.12.
+
 **Out-of-band cost is 2.9s** (`Stage parse completed … in 810.9s` against
 `total=808s`) — torch re-import plus converter construction. The parse-time
 reduction plan gated "relax `--max-tasks-per-child=1`" on this exceeding 60s. At
@@ -901,6 +1209,87 @@ Also in this change: the Embed tab's Domain select gained the `↻` refresh butt
 the Chat tab already had. `loadDomainList()` already repopulated both dropdowns,
 so it is markup only.
 
+### 15.12 Peak RSS is O(total pages), not O(batch size) (2026-08-14)
+
+Full write-up: **`docs/20260814_parse_oom_and_allocator_ratchet.md`** (F24).
+Plan: `docs/plans/20260814_parse_oom_702_page_pdf.md`.
+
+`celery_worker_upload` was SIGKILLed by the cgroup while parsing a 702-page,
+13 MB PDF — batch 8 of 15, 17s into `convert()`. `WorkerLostError: signal 9` is
+the parent observing a dead fork child; there is no traceback from inside the
+parse because nothing raised.
+
+Post-convert RSS per batch (`logs/celery_worker_upload.log:1333-1550`):
+
+| batch | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| rss | 1587 | 1944 | 2265 | 2504 | 2818 | 2736 | 2759 | killed |
+| delta | — | +357 | +321 | +239 | +314 | −82 | +23 | — |
+
+**The invariant claimed by §4.6.3, §15.1 and `parse_pdf`'s docstring — "peak
+memory is O(batch size) rather than O(total pages)" — was false**, and the
+504-page NLTK run that appeared to validate it was in fact at 3097 MB against a
+3.5G limit, 86% utilised. There was never headroom for a longer document.
+
+Two separate causes, only one of which batch size touches:
+
+1. **Working set, proportional to batch size.** `generate_page_images=True` at
+   `images_scale=2.0` means `doc.pages[n].image` holds a render of every page in
+   the batch from `convert()` until `del doc` — ~260 MB per 50-page batch.
+   `_expand_and_crop` is the only consumer and only needs pages carrying a
+   `PictureItem`: 10 of 50 in batch 7.
+2. **An allocator ratchet, independent of batch size.** RSS steps up per batch
+   and never falls. `del doc` does run and
+   `test_pdf_parser_streaming.py::test_no_document_survives_the_parse` proves no
+   `DoclingDocument` survives, so this is freed-but-not-returned memory: glibc
+   per-thread arenas (`DOCLING_NUM_THREADS=6`, default `MALLOC_ARENA_MAX` is
+   8×NCPU) plus torch's CPU caching allocator. The deceleration and plateau are
+   arena reuse, not unbounded retention.
+
+What landed:
+
+- **`_release_freed_memory()`** — `gc.collect()` then `libc.malloc_trim(0)`,
+  called immediately after `del doc, page_items`. Resolution of the symbol is
+  cached including the failure case, and a missing `libc.so.6` (macOS, musl) is
+  a silent no-op — those allocators have neither the arenas nor the call.
+  Milliseconds against a ~75s convert.
+- **`MALLOC_ARENA_MAX=2`, `MALLOC_TRIM_THRESHOLD_=131072`** in `x-common-env`.
+  The higher-leverage half: `malloc_trim` cannot return what a stranded arena
+  still owns.
+- **`_PeakRssSampler`** — a daemon thread sampling `_rss_mb()` every 0.5s across
+  the batch loop. Every memory figure in §15 before this was sampled *between*
+  batches, i.e. at a local minimum, so the peak that actually kills the process
+  had never been observed. The summary line now carries both
+  `peak_rss=` (sampled) and `post_convert_rss=` (the old number, kept so the
+  historical series stays comparable).
+- **Per-batch RSS logging** at three points — after `convert()`, after the
+  release, after the emit. The delta across the release is the number that says
+  whether the trim worked.
+- **`DOCLING_PAGE_BATCH_SIZE` 50 → 40** and **`celery_worker_upload` 3.5G → 4G**.
+  Together worth ~564 MB against a ratchet that had consumed ~1.2 GB by batch 5;
+  they are the margin that makes the next measurement safe to take, not the fix.
+- **`_record_worker_lost`** (`ingestion_tasks.py`) — a `task_failure` handler
+  that marks the document `error` with the right `error_stage` when the failure
+  is a `WorkerLostError`. It runs in `MainProcess`, which outlives the child.
+  Previously a SIGKILL left `stage='parsing'` with a live claim, and recovery
+  needed `INGESTION_CLAIM_TIMEOUT_MINUTES=180` to elapse **and** the next
+  6-hourly `recover_and_dispatch` tick — up to ~9 hours looking healthy while
+  the retry budget went unspent. It deliberately ignores ordinary exceptions,
+  which `_run_stage` already recorded.
+
+**Not yet measured.** Every number above except the crash trace is predicted.
+The gate is a re-run of the 702-page book: peak flat across batches, sampled
+`peak_rss` < 3200 MB. If it still ratchets, the remaining cause is docling
+retaining page renders the parse does not need, and the fix is
+`generate_page_images=False` with crops rendered on demand from `pypdfium2`
+inside `_expand_and_crop` — the sole consumer of `page.image`, and it already
+does the pdf-point→pixel math including the y-flip.
+
+Also note `celery_worker_upload` 4G + `celery_worker_ingestion` 3G overcommits
+the 6.77 GiB VM. Limits are ceilings, not reservations, so this only bites when
+both workers parse large documents at once — the case §15.2 already names. The
+answer there is to drop ingestion to 2.5G, not to grow the VM.
+
 ---
 
-**Last updated**: 2026-08-12
+**Last updated**: 2026-08-14

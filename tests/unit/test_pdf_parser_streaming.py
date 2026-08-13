@@ -23,7 +23,7 @@ import threading
 import time
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -345,3 +345,125 @@ class TestVlmStats:
 
         assert parser._vlm_seconds == pytest.approx(3.0)
         assert parser._vlm_failures == 1
+
+
+class TestMemoryRelease:
+    """The batch loop must hand freed memory back to the OS, not just to glibc.
+
+    `del doc` already dropped the last reference — `TestBatching` proves that —
+    yet a 702-page parse still climbed +357, +321, +239, +314MB across its first
+    five batches and was OOM-killed at batch 8 of 15. The blocks were sitting in
+    glibc's per-thread arenas, so releasing the *objects* was never sufficient.
+    """
+
+    def test_freed_memory_is_released_once_per_batch(self, parser, converter):
+        with patch(
+            "app.ingestion.processors.gemini_docling_parser._release_freed_memory"
+        ) as release:
+            _run(parser, converter, total_pages=25)
+
+        assert release.call_count == 3  # one per batch: (1,10), (11,20), (21,25)
+
+    def test_release_runs_before_the_next_convert(self, parser, converter):
+        """Ordering matters: trimming after the next convert() has already
+        allocated leaves both batches' memory resident at the same moment,
+        which is the peak that kills the process."""
+        events = []
+        converter._events = events
+
+        def _record_release():
+            events.append(("release", None))
+
+        with patch(
+            "app.ingestion.processors.gemini_docling_parser._release_freed_memory",
+            new=_record_release,
+        ):
+            _run(parser, converter, total_pages=25, events=events)
+
+        kinds = [kind for kind, _ in events if kind in ("convert", "release")]
+        assert kinds == ["convert", "release", "convert", "release", "convert", "release"]
+
+    def test_malloc_trim_is_called_with_zero(self):
+        from app.ingestion.processors import gemini_docling_parser as mod
+
+        trim = Mock()
+        with patch.object(mod, "_resolve_malloc_trim", return_value=trim):
+            mod._release_freed_memory()
+
+        trim.assert_called_once_with(0)
+
+    def test_release_is_a_no_op_without_glibc(self):
+        """macOS and musl have no libc.so.6. A parse must not die for it."""
+        from app.ingestion.processors import gemini_docling_parser as mod
+
+        with patch.object(mod, "_MALLOC_TRIM", mod._UNRESOLVED), \
+             patch("ctypes.CDLL", side_effect=OSError("no libc.so.6")):
+            mod._release_freed_memory()  # must not raise
+            assert mod._resolve_malloc_trim() is None
+
+    def test_malloc_trim_failure_does_not_propagate(self):
+        from app.ingestion.processors import gemini_docling_parser as mod
+
+        trim = Mock(side_effect=OSError("boom"))
+        with patch.object(mod, "_resolve_malloc_trim", return_value=trim):
+            mod._release_freed_memory()  # must not raise
+
+    def test_resolution_is_cached(self):
+        """Called once per batch; CDLL is not free and the failure case must
+        not be retried on every batch of a 15-batch document."""
+        from app.ingestion.processors import gemini_docling_parser as mod
+
+        with patch.object(mod, "_MALLOC_TRIM", mod._UNRESOLVED), \
+             patch("ctypes.CDLL", side_effect=OSError("no libc")) as cdll:
+            mod._resolve_malloc_trim()
+            mod._resolve_malloc_trim()
+            mod._resolve_malloc_trim()
+
+        assert cdll.call_count == 1
+
+
+class TestPeakRssSampler:
+    """peak_rss was sampled only between batches, so it never saw the peak.
+
+    The 702-page kill landed 17s into a convert() whose predecessor had logged
+    2759MB against a 3584MB limit — every recorded peak in the parse history is
+    a snapshot taken at a local minimum.
+    """
+
+    def test_reports_a_peak_no_between_batch_sample_would_see(self):
+        from app.ingestion.processors.gemini_docling_parser import _PeakRssSampler
+
+        readings = iter([100.0] + [900.0] * 50 + [100.0] * 50)
+
+        def _fake_rss():
+            try:
+                return next(readings)
+            except StopIteration:
+                return 100.0
+
+        with patch(
+            "app.ingestion.processors.gemini_docling_parser._rss_mb", new=_fake_rss
+        ):
+            with _PeakRssSampler(interval=0.001) as sampler:
+                time.sleep(0.1)
+
+        assert sampler.peak == 900.0
+
+    def test_thread_stops_on_exit(self):
+        from app.ingestion.processors.gemini_docling_parser import _PeakRssSampler
+
+        with _PeakRssSampler(interval=0.001) as sampler:
+            thread = sampler._thread
+        assert thread is not None
+        assert not thread.is_alive()
+
+    def test_summary_reports_both_peak_and_post_convert_rss(self, parser, converter, caplog):
+        """The post-convert number is kept because every historical measurement
+        in docs/ is that number; mixing the two would break the series."""
+        with caplog.at_level("INFO"):
+            _run(parser, converter, total_pages=25)
+
+        summary = [r.message for r in caplog.records if "parse_pdf summary:" in r.message]
+        assert len(summary) == 1
+        assert "peak_rss=" in summary[0]
+        assert "post_convert_rss=" in summary[0]

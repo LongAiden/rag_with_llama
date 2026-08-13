@@ -620,3 +620,121 @@ class TestEventLoopReuse:
 
         assert first == second
         assert not tasks._LOOP.is_closed()
+
+
+class TestWorkerLostHandler:
+    """A SIGKILLed child never reaches the `except` in `_run_stage`.
+
+    Without this handler the row keeps stage='parsing' and a live claim, so
+    recovery needs the 180-minute claim timeout AND the next 6-hourly
+    recover_and_dispatch tick — up to ~9 hours in which the document looks
+    healthy and the retry budget is never spent. A cgroup OOM during a large
+    PDF parse is the case that produces it.
+    """
+
+    @staticmethod
+    def _sender(name):
+        return SimpleNamespace(name=name)
+
+    def _call_handler(self, exception, sender_name, args, repo=None):
+        import app.worker.ingestion_tasks as tasks
+
+        repo = repo or AsyncMock()
+        with patch.object(tasks, "_get_config", return_value=MagicMock()), \
+             patch.object(tasks, "_get_repo", return_value=repo):
+            tasks._record_worker_lost(
+                sender=self._sender(sender_name),
+                task_id="task-1",
+                exception=exception,
+                args=args,
+            )
+        return repo
+
+    def test_records_error_for_the_stage_that_died(self):
+        from billiard.exceptions import WorkerLostError
+        import app.worker.ingestion_tasks as tasks
+
+        repo = self._call_handler(
+            WorkerLostError("Worker exited prematurely: signal 9 (SIGKILL) Job: 3."),
+            "app.worker.ingestion_tasks.parse_document",
+            ("doc-123",),
+        )
+
+        repo.record_error.assert_awaited_once()
+        doc_id, message, max_attempts = repo.record_error.await_args.args
+        assert doc_id == "doc-123"
+        assert "signal 9" in message
+        assert max_attempts == tasks.MAX_ATTEMPTS
+        # error_stage drives retry resumption — a parse that died must not be
+        # resumed from a chunk artifact that was never written.
+        assert repo.record_error.await_args.kwargs["stage"] == "parse"
+
+    @pytest.mark.parametrize(
+        "task_name,stage",
+        [
+            ("app.worker.ingestion_tasks.parse_document", "parse"),
+            ("app.worker.ingestion_tasks.chunk_document", "chunk"),
+            ("app.worker.ingestion_tasks.embed_document", "embed"),
+        ],
+    )
+    def test_maps_each_task_to_its_stage(self, task_name, stage):
+        from billiard.exceptions import WorkerLostError
+
+        repo = self._call_handler(WorkerLostError("killed"), task_name, ("doc-1",))
+
+        assert repo.record_error.await_args.kwargs["stage"] == stage
+
+    def test_ignores_ordinary_exceptions(self):
+        """_run_stage already recorded those. Recording again would spend two
+        attempts on one failure and could tip a document to 'failed'."""
+        repo = self._call_handler(
+            ValueError("parsed artifact missing"),
+            "app.worker.ingestion_tasks.parse_document",
+            ("doc-123",),
+        )
+
+        repo.record_error.assert_not_awaited()
+
+    def test_ignores_tasks_that_own_no_document(self):
+        from billiard.exceptions import WorkerLostError
+
+        repo = self._call_handler(
+            WorkerLostError("killed"),
+            "app.worker.ingestion_tasks.recover_and_dispatch",
+            (),
+        )
+
+        repo.record_error.assert_not_awaited()
+
+    def test_missing_doc_id_is_not_an_error(self):
+        from billiard.exceptions import WorkerLostError
+
+        repo = self._call_handler(
+            WorkerLostError("killed"),
+            "app.worker.ingestion_tasks.parse_document",
+            None,
+        )
+
+        repo.record_error.assert_not_awaited()
+
+    def test_db_failure_does_not_escape_the_handler(self):
+        """Best-effort: the stale sweep is still the backstop, and raising in a
+        signal handler replaces a useful log line with a confusing one."""
+        from billiard.exceptions import WorkerLostError
+
+        repo = AsyncMock()
+        repo.record_error.side_effect = RuntimeError("db down")
+
+        self._call_handler(
+            WorkerLostError("killed"),
+            "app.worker.ingestion_tasks.parse_document",
+            ("doc-123",),
+            repo=repo,
+        )  # must not raise
+
+    def test_is_connected_to_the_task_failure_signal(self):
+        from celery.signals import task_failure
+        import app.worker.ingestion_tasks as tasks
+
+        receivers = [r() for _, r in task_failure.receivers]
+        assert tasks._record_worker_lost in [r for r in receivers if r is not None]
