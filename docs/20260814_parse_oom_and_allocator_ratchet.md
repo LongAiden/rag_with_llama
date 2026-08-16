@@ -140,9 +140,8 @@ like it is being worked on and its retry budget is never spent.
   `x-common-env`. The higher-leverage half of the fix: `malloc_trim` cannot
   return what a stranded arena still owns.
 - `DOCLING_PAGE_BATCH_SIZE` 50 → 40 (~260 MB → ~208 MB of page renders).
-- `celery_worker_upload.memory` 3.5G → 4G.
-- `celery_worker_ingestion`'s comment corrected — it sits at 3G because the VM
-  cannot fund 4G twice, not because it needs less.
+- `celery_worker_upload.memory` 3.5G → 4G, `celery_worker_ingestion.memory`
+  3G → 4G. See "The recovery path was the more dangerous one" below.
 
 ### Config and tests
 
@@ -164,6 +163,7 @@ baseline (§10.3) — unchanged by this work.
 | change | headroom bought |
 |---|---|
 | `celery_worker_upload` 3.5G → 4G | ~512 MB |
+| `celery_worker_ingestion` 3G → 4G | ~1024 MB, on the path that had the least |
 | batch 50 → 40 | ~52 MB |
 | `_release_freed_memory()` + `MALLOC_ARENA_MAX` | the ~1.2 GB ratchet, if the diagnosis holds |
 
@@ -190,13 +190,38 @@ pdf-point→pixel math including the y-flip, so the change is contained — but
 `generate_picture_images` must stay `True`, because `item.get_image(doc)` falls
 back to the page image when a `PictureItem` carries none.
 
+## The recovery path was the more dangerous one
+
+Found while answering "do I have to re-upload the document?", and worth
+recording because it is not visible from the crash log at all.
+
+Two paths dispatch the ingestion chain, and they do not go to the same worker:
+
+| path | queue | worker | limit before |
+|---|---|---|---|
+| `POST /upload` (`document_routes.py:110`) | `upload` | `celery_worker_upload` | 3.5G |
+| `recover_and_dispatch`, weekly scan (`_dispatch_pending`, `ingestion_tasks.py:310-327`) | `ingestion` | `celery_worker_ingestion` | **3G** |
+
+`_dispatch_pending` hardcodes `INGESTION_QUEUE`. So the *recovery* path — the one
+that picks up a document after exactly this kind of failure, unattended, on a
+6-hourly timer — was handing large PDFs to the worker with **less** headroom
+than the one that had just died on 3.5G. A retry of this book through recovery
+would have OOM-killed faster than the original run, and `INGESTION_MAX_ATTEMPTS`
+would have quietly spent both attempts and marked it `failed`.
+
+`celery_worker_ingestion` is therefore also 4G. The two workers run the same
+image and the same pipeline and receive the same documents; sizing them
+differently only decides which path fails.
+
 ## Also worth knowing
 
-- **The limits now overcommit the VM.** 4G + 3G (workers) + 1G (postgres) +
+- **The limits now overcommit the VM.** 4G + 4G (workers) + 1G (postgres) +
   768M (app) + 192M (beat) against a 6.77 GiB Docker VM. Limits are ceilings,
-  not reservations, so this only bites when both workers parse large documents
-  simultaneously — the case §15.2 already names as the one that exhausts it. The
-  answer there is to drop ingestion to 2.5G, not to grow the VM.
+  not reservations, and the two workers are rarely both parsing, so this costs
+  nothing until they are — the case §15.2 already names as the one that
+  exhausts it. If it bites, scale `celery_worker_ingestion` to 0 for the
+  duration of a large interactive upload; do not shrink its limit back, because
+  that just restores the trap above.
 - **This limit has now been raised twice by an OOM kill**, and both times the
   previous value had been recorded as a measured floor. Both measurements were
   honest and both were against a single document. The lesson is not "measure

@@ -1265,9 +1265,14 @@ What landed:
 - **Per-batch RSS logging** at three points — after `convert()`, after the
   release, after the emit. The delta across the release is the number that says
   whether the trim worked.
-- **`DOCLING_PAGE_BATCH_SIZE` 50 → 40** and **`celery_worker_upload` 3.5G → 4G**.
+- **`DOCLING_PAGE_BATCH_SIZE` 50 → 40** and **both workers 3.5G/3G → 4G**.
   Together worth ~564 MB against a ratchet that had consumed ~1.2 GB by batch 5;
   they are the margin that makes the next measurement safe to take, not the fix.
+  `celery_worker_ingestion` matters as much as `celery_worker_upload` here: the
+  same documents reach both, `upload` from the API and `ingestion` from
+  `recover_and_dispatch` and the weekly scan (`_dispatch_pending` hardcodes
+  `INGESTION_QUEUE`). At 3G it had *less* headroom than the 3.5G that died, so
+  the unattended recovery path was the more dangerous of the two.
 - **`_record_worker_lost`** (`ingestion_tasks.py`) — a `task_failure` handler
   that marks the document `error` with the right `error_stage` when the failure
   is a `WorkerLostError`. It runs in `MainProcess`, which outlives the child.
@@ -1285,10 +1290,13 @@ retaining page renders the parse does not need, and the fix is
 inside `_expand_and_crop` — the sole consumer of `page.image`, and it already
 does the pdf-point→pixel math including the y-flip.
 
-Also note `celery_worker_upload` 4G + `celery_worker_ingestion` 3G overcommits
-the 6.77 GiB VM. Limits are ceilings, not reservations, so this only bites when
-both workers parse large documents at once — the case §15.2 already names. The
-answer there is to drop ingestion to 2.5G, not to grow the VM.
+Also note the two workers at 4G each overcommit the 6.77 GiB VM — 8G of worker
+ceilings before postgres, app and beat. Limits are ceilings, not reservations,
+and the two are rarely both parsing, so this costs nothing until they are — the
+case §15.2 already names. If it does bite, scale `celery_worker_ingestion` to 0
+for the duration of a large interactive upload rather than shrinking its limit:
+a 3G worker is a worker that cannot parse a large book at all, which is the
+trap this change closed.
 
 ---
 

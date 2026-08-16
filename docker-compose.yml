@@ -314,10 +314,9 @@ services:
           # died on a 504-page PDF, then 3.5G held that one at 3097MB (86%) and
           # died on a 702-page one at batch 8 of 15. Peak scales with total
           # pages, not batch size, until _release_freed_memory() proves
-          # otherwise — see docs/plans/20260814_parse_oom_702_page_pdf.md.
-          # celery_worker_ingestion sits at 3G only because the 6.77G VM cannot
-          # fund 4G twice; two simultaneous large parses remain the case that
-          # exhausts it, and the fix there is to drop ingestion to 2.5G.
+          # otherwise — see docs/20260814_parse_oom_and_allocator_ratchet.md.
+          # celery_worker_ingestion is 4G too; see the note there on the
+          # resulting VM overcommit.
           memory: 4G
         reservations:
           cpus: "0.5"
@@ -362,11 +361,21 @@ services:
         limits:
           # See celery_worker_upload — same image, same docling pipeline.
           cpus: "6.0"
-          # 3G against celery_worker_upload's 4G, not because this worker needs
-          # less — same image, same pipeline, same wall — but because the 6.77G
-          # VM cannot fund 4G twice. Batch ingestion tends to run unattended, so
-          # it is the one that can afford to be the smaller of the two.
-          memory: 3G
+          # 4G, matching celery_worker_upload, because the same documents reach
+          # both: `upload` from the API, `ingestion` from recover_and_dispatch
+          # and the weekly scan (_dispatch_pending hardcodes INGESTION_QUEUE).
+          # Sizing them differently only means the recovery path OOM-kills a
+          # document the interactive path survives — and recovery is the path
+          # nobody is watching. This was 3G, i.e. LESS headroom than the 3.5G
+          # that already died on a 702-page book.
+          #
+          # Worker ceilings now sum to 8G against a 6.77G VM. Limits are
+          # ceilings, not reservations, and the two workers are rarely both
+          # parsing, so this costs nothing until they are. If it does bite,
+          # scale this service to 0 for the duration of a large interactive
+          # upload — do not shrink the limit back, because a 3G worker is a
+          # worker that cannot parse a large book at all.
+          memory: 4G
         reservations:
           memory: 512M
     command: ["sh", "-c", "trap 'kill 0' EXIT; celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1 --max-tasks-per-child=1 2>&1 | tee -a /app/logs/celery_worker_ingestion.log"]
