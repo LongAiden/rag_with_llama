@@ -790,8 +790,9 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         return sel.value;
     }
 
-    // Documents are listed from the ingestion status table, so one still being
-    // parsed shows up disabled with its stage rather than silently missing.
+    // Only successfully embedded documents appear in the query dropdown.
+    // In-progress and failed documents are filtered out here rather than at
+    // the endpoint so the API remains useful for management/admin views.
     async function loadDomainDocuments() {
         const sel = document.getElementById('chat-document');
         const domain = document.getElementById('chat-domain').value;
@@ -801,12 +802,10 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             const res = await fetch(`/domains/${encodeURIComponent(domain)}/documents`);
             if (!res.ok) return;
             const data = await res.json();
-            const docs = data.documents || [];
+            const docs = (data.documents || []).filter(d => d.stage === 'embedded');
             sel.innerHTML += docs.map(d => {
                 const name = d.doc_name || d.file_name;
-                const ready = d.stage === 'embedded';
-                const suffix = ready ? ` (${d.chunk_count || 0})` : ` — (${d.stage})`;
-                return `<option value="${escapeHtml(d.document_id)}"${ready ? '' : ' disabled'}>${escapeHtml(name)}${suffix}</option>`;
+                return `<option value="${escapeHtml(d.document_id)}">${escapeHtml(name)} (${d.chunk_count || 0})</option>`;
             }).join('');
         } catch (_) { /* leave the "all documents" default in place */ }
     }
