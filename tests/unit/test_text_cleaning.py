@@ -270,3 +270,77 @@ class TestTextCleaningPipeline:
         result = pipeline.clean(text)
         
         # Behavior depends on implementation
+
+
+class TestMathPreservation:
+    """Tests for math symbol preservation in the default pipeline."""
+
+    def test_default_pipeline_preserves_math_symbols(self):
+        """Default pipeline preserves math symbols and never emits [math]."""
+        pipeline = TextCleaningPipeline()
+        text = "∀ ∃ ∈ ∇ α ∑ ∫ √"
+        
+        result = pipeline.clean(text)
+        
+        assert "∀" in result
+        assert "∃" in result
+        assert "∈" in result
+        assert "∇" in result
+        assert "α" in result
+        assert "∑" in result
+        assert "∫" in result
+        assert "√" in result
+        assert "[math]" not in result
+
+    def test_default_pipeline_preserves_superscripts(self):
+        """Default pipeline preserves x² (NFC regression guard)."""
+        pipeline = TextCleaningPipeline()
+        text = "x² + y³ = z⁴"
+        
+        result = pipeline.clean(text)
+        
+        assert "²" in result
+        assert "³" in result
+        assert "⁴" in result
+
+    def test_pipe_in_prose_preserved_table_row_normalized(self):
+        """|x| > 0 in prose survives; real table row is still normalized."""
+        pipeline = TextCleaningPipeline()
+        
+        # Prose with absolute value
+        prose = "The condition |x| > 0 holds for all x."
+        prose_result = pipeline.clean(prose)
+        assert "|x|" in prose_result or "| x |" not in prose_result
+        
+        # Table row
+        table_row = "| a | b | c |"
+        table_result = pipeline.clean(table_row)
+        assert "| a | b | c |" in table_result or "|a|b|c|" not in table_result
+
+    def test_currency_symbols_preserved(self):
+        """€100 survives the default pipeline."""
+        pipeline = TextCleaningPipeline()
+        text = "Price: €100 and £50"
+        
+        result = pipeline.clean(text)
+        
+        assert "€" in result
+        assert "£" in result
+
+    def test_explicit_math_normalizer_still_transliterates(self):
+        """MathNotationNormalizer still transliterates when explicitly included."""
+        pipeline = TextCleaningPipeline(
+            strategies=[
+                SurrogateRemovalStrategy(),
+                UnicodeNormalizer('NFC'),
+                MathNotationNormalizer(),
+                WhitespaceNormalizer(),
+            ]
+        )
+        text = "α + ∑ = γ"
+        
+        result = pipeline.clean(text)
+        
+        assert "alpha" in result
+        assert "sum" in result
+        assert "gamma" in result

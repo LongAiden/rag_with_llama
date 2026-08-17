@@ -97,6 +97,9 @@ class AppSettings(BaseSettings):
     persist_ingestion_artifacts: bool = Field(
         default=True, validation_alias='PERSIST_INGESTION_ARTIFACTS'
     )
+    preserve_math_notation: bool = Field(
+        default=True, validation_alias='PRESERVE_MATH_NOTATION'
+    )
     ingestion_max_attempts: int = Field(default=2, validation_alias='INGESTION_MAX_ATTEMPTS')
     ingestion_claim_timeout_minutes: int = Field(default=30, validation_alias='INGESTION_CLAIM_TIMEOUT_MINUTES')
     default_chunk_size: int = Field(default=512, validation_alias='DEFAULT_CHUNK_SIZE')

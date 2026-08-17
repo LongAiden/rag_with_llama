@@ -18,7 +18,7 @@ except ImportError:
         return decorator
 
 from app.models.schemas import SimpleRAGResponse
-from app.ingestion.processors.prompts import OLLAMA_RAG_PROMPT_TEMPLATE
+from app.ingestion.processors.prompts import RAG_PROMPT_TEMPLATE
 
 
 class OllamaBackend:
@@ -31,7 +31,7 @@ class OllamaBackend:
 
         # Single source of truth: AppSettings also reads .env, which os.environ does not.
         ollama_base_url = AppSettings().ollama_base_url.rstrip("/")
-        prompt = OLLAMA_RAG_PROMPT_TEMPLATE.format(context=context, query=query)
+        prompt = RAG_PROMPT_TEMPLATE.format(context=context, query=query)
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{ollama_base_url}/api/generate",
@@ -73,25 +73,7 @@ class GeminiBackend:
 
         genai.configure(api_key=api_key)
 
-        prompt = f"""You are a RAG assistant. Answer the question using ONLY the provided context below.
-
-Context rules:
-- Blocks labelled [Section context: ...] contain ALL chunks from a document section in order. \
-Use them to answer structural questions (counts, lists, enumeration).
-- Blocks labelled [Source N] are the top retrieved chunks with their page context.
-- If a [Section context] block is present, prefer it over individual sources for \
-counting or listing tasks.
-- If the answer is not in the context, say "I don't have enough information to answer that."
-- Never make up information not present in the context.
-- Cite page numbers when available (e.g. "Page 3").
-- Summarize the relevant information in your own words. Do not copy sentences verbatim from the context.
-
-Context:
-{context}
-
-Question: {query}
-
-Answer:"""
+        prompt = RAG_PROMPT_TEMPLATE.format(context=context, query=query)
 
         try:
             model = genai.GenerativeModel(self.model)

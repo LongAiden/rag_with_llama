@@ -305,7 +305,9 @@ class ChunkEmbeddingPipeline:
                 f"No valid chunks created from document {document_id}. "
                 f"All {len(chunks)} chunks had None or empty text.")
 
-        text_cleaner = TextCleaningPipeline()
+        from app.config.app_config import AppSettings
+        preserve_math = AppSettings().preserve_math_notation
+        text_cleaner = TextCleaningPipeline(preserve_math=preserve_math)
         chunk_texts = []
         for chunk in valid_chunks:
             text = getattr(chunk, 'text', '')

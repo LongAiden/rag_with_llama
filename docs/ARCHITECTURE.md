@@ -363,7 +363,7 @@ The return value is the concatenated markdown with `[PAGE:N]` markers. It is:
 | `src/app/ingestion/processors/gemini_docling_parser.py` | Core PDF parser: `parse_pdf`, `_build_page`, `_finalize_page`, VLM calls |
 | `src/app/ingestion/processors/ollama_pdf_parser.py` | Ollama subclass (overrides `_call_vlm` only) |
 | `src/app/ingestion/processors/pdf_parser_base.py` | `PDFParserBase` abstract contract |
-| `src/app/ingestion/processors/prompts.py` | VLM prompts (`_VLM_IMAGE_PROMPT`, `_VLM_TABLE_PROMPT`) |
+| `src/app/ingestion/processors/prompts.py` | VLM prompts (`VLM_IMAGE_PROMPT`, `VLM_TABLE_PROMPT`, `OLLAMA_IMAGE_PROMPT`, `OLLAMA_TABLE_PROMPT`) and the shared `RAG_PROMPT_TEMPLATE` |
 | `src/app/ingestion/processors/processor_factory.py` | Non-PDF file processor factory |
 | `src/app/ingestion/embedding/pipeline.py` | `parse_file()` — orchestrates parser creation and dispatch |
 
@@ -409,14 +409,15 @@ For DOCX and TXT files, the chunker is selected by `CHUNKER_TYPE` (default `mark
 
 #### 4.6.5 Text cleaning pipeline
 
-Before embedding, each chunk's text passes through `TextCleaningPipeline` (`src/app/ingestion/text_cleaning/cleaners.py:208-294`), a chain-of-responsibility of six strategies applied in order:
+Before embedding, each chunk's text passes through `TextCleaningPipeline` (`src/app/ingestion/text_cleaning/cleaners.py:208-294`), a chain-of-responsibility of strategies applied in order. The default chain is:
 
 1. **SurrogateRemovalStrategy** — strips Unicode surrogate pairs (U+D800–U+DFFF) that cause UTF-8 encoding errors.
-2. **UnicodeNormalizer** — NFKC normalization (compatibility composition).
-3. **MathNotationNormalizer** — replaces Greek letters, math operators, superscripts, and arrows with ASCII equivalents (e.g., `α` → `alpha`, `×` → ` * `, `²` → `^2`).
-4. **TableStructurePreserver** — normalizes box-drawing characters to ASCII table syntax (`│` → ` | `, `─` → `-`).
-5. **SpecialSymbolNormalizer** — replaces smart quotes, dashes, ellipsis, bullets, and currency symbols with ASCII equivalents.
-6. **WhitespaceNormalizer** — collapses multiple spaces, normalizes newlines (max 2 consecutive), strips trailing whitespace.
+2. **UnicodeNormalizer** — NFC normalization (canonical composition). Preserves superscripts and compatibility characters that NFKC would decompose.
+3. **TableStructurePreserver** — normalizes box-drawing characters to ASCII table syntax (`│` → ` | `, `─` → `-`). Pipe spacing is normalized only on lines that match `^\s*\|.*\|\s*$` (table rows), so `|x|` in prose is not mangled.
+4. **SpecialSymbolNormalizer** — replaces smart quotes, dashes, ellipsis, and bullets with ASCII equivalents. Currency symbols and vulgar fractions are preserved.
+5. **WhitespaceNormalizer** — collapses multiple spaces, normalizes newlines (max 2 consecutive), strips trailing whitespace.
+
+When `PRESERVE_MATH_NOTATION=false`, **MathNotationNormalizer** is inserted at position 3, replacing Greek letters, math operators, superscripts, and arrows with ASCII equivalents (e.g., `α` → `alpha`, `×` → ` * `, `²` → `^2`). The class remains available for opt-in use via the `strategies=` argument or `add_strategy()`.
 
 Each strategy is isolated: if one fails, the pipeline logs and continues with the next. The pipeline is applied per-chunk, not per-document.
 
@@ -604,6 +605,7 @@ Key environment variables (see [`.env.example`](../.env.example) for the full li
 | `PARSED_DIR` | Where parse-stage markdown is dumped (default `data/parsed`) |
 | `CHUNKS_DIR` | Where chunk-stage folders are dumped (default `data/chunks`) |
 | `PERSIST_INGESTION_ARTIFACTS` | Set false to skip both dumps (default true) |
+| `PRESERVE_MATH_NOTATION` | Set false to transliterate math symbols to ASCII (default true) |
 | `INGESTION_MAX_ATTEMPTS` | Max retries before `failed` |
 | `INGESTION_CLAIM_TIMEOUT_MINUTES` | Stale claim timeout |
 | `DEFAULT_CHUNK_SIZE` | Default chunk size |

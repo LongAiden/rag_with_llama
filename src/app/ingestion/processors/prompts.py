@@ -18,6 +18,9 @@ in the SAME cell.
 the value in the top row only.
 - If the table has multiple header rows, include all of them in order.
 - Preserve all cell values exactly as they appear.
+- Preserve mathematical symbols, Greek letters, superscripts and subscripts exactly as \
+printed. Do NOT transliterate them into words.
+- If a cell's content contains a literal | character, escape it as \|.
 - Output only the <table>...</table> block — no commentary or preamble.
 - Do NOT use code fences.
 """
@@ -35,6 +38,8 @@ Rules:
 - For diagrams or flowcharts: transcribe ONLY the visible text labels, captions,
   and annotations verbatim in the original language. No English descriptions.
 - For charts/graphs: transcribe all axis labels, legend entries, and data values.
+- Transcribe mathematical expressions exactly, preserving every symbol (∑ ∫ ∇ α ≤ ² ₁). \
+Do NOT transliterate a symbol into a word and do NOT describe an equation in prose.
 - For colored boxes, banners, or callout regions: include ALL text inside them.
 - If the image also contains a table, render it as a GFM markdown table.
 - ALL transcribed text must be placed inside the <figure>...</figure> block.
@@ -116,7 +121,7 @@ Output only the <table>...</table> block. No extra commentary.
 
 # ── RAG generation prompt templates ──────────────────────────────────────────
 
-OLLAMA_RAG_PROMPT_TEMPLATE = """\
+RAG_PROMPT_TEMPLATE = """\
 You are a RAG assistant. Answer the question using ONLY the provided context below.
 
 Context rules:
@@ -128,7 +133,11 @@ counting or listing tasks.
 - If the answer is not in the context, say "I don't have enough information to answer that."
 - Never make up information not present in the context.
 - Cite page numbers when available (e.g. "Page 3").
-- Summarize the relevant information in your own words. Do not copy sentences verbatim from the context.
+- Summarize the relevant information in your own words. Do not copy whole sentences \
+verbatim from the context.
+- EXCEPTION: reproduce formulas, equations, symbols, units and identifiers EXACTLY as \
+they appear in the context, including any markup already present. Never transliterate \
+a symbol into a word — write ∑, not "sum".
 
 Context:
 {context}
