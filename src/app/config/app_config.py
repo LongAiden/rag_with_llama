@@ -97,6 +97,9 @@ class AppSettings(BaseSettings):
     persist_ingestion_artifacts: bool = Field(
         default=True, validation_alias='PERSIST_INGESTION_ARTIFACTS'
     )
+    preserve_math_notation: bool = Field(
+        default=True, validation_alias='PRESERVE_MATH_NOTATION'
+    )
     ingestion_max_attempts: int = Field(default=2, validation_alias='INGESTION_MAX_ATTEMPTS')
     ingestion_claim_timeout_minutes: int = Field(default=30, validation_alias='INGESTION_CLAIM_TIMEOUT_MINUTES')
     default_chunk_size: int = Field(default=512, validation_alias='DEFAULT_CHUNK_SIZE')
@@ -107,7 +110,7 @@ class AppSettings(BaseSettings):
     # CPU/thread and VLM-concurrency experiments are .env changes rather than
     # code edits. See docs/20260804_ingestion_performance_investigation.md.
     docling_num_threads: int = Field(default=2, validation_alias='DOCLING_NUM_THREADS')
-    docling_page_batch_size: int = Field(default=50, validation_alias='DOCLING_PAGE_BATCH_SIZE')
+    docling_page_batch_size: int = Field(default=40, validation_alias='DOCLING_PAGE_BATCH_SIZE')
     # TableFormer structure decoder: "accurate" or "fast". Docling time is not
     # uniform across a document — in a 504-page run one batch of 50 pages (the
     # dense multi-column index, classified as tables by the layout model) cost

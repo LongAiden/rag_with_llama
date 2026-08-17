@@ -209,6 +209,25 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
     box-shadow: 0 1px 4px rgba(0,0,0,0.07);
 }
 .ai-answer-text { white-space: pre-wrap; margin-bottom: 12px; }
+.ai-answer-text sup, .ai-answer-text sub {
+    font-size: 0.72em;
+    line-height: 0;
+}
+.ai-answer-text sup { vertical-align: super; }
+.ai-answer-text sub { vertical-align: sub; }
+.math-block {
+    display: block;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    background: #f4f6fb;
+    border-left: 3px solid #007bff;
+    padding: 8px 12px;
+    margin: 8px 0;
+    border-radius: 0 4px 4px 0;
+    white-space: pre;
+    overflow-x: auto;
+    font-size: 13px;
+}
+.math-block sup, .math-block sub { font-size: 0.75em; }
 .sources-section { border-top: 1px solid #e9ecef; padding-top: 10px; margin-top: 8px; }
 .sources-header { font-weight: 600; font-size: 13px; color: #495057; margin-bottom: 8px; }
 .source-item {
@@ -606,6 +625,110 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             .replace(/"/g, '&quot;');
     }
 
+    // Lightweight math formatting for LLM answers. Operates on text that has
+    // already been through escapeHtml(), so & < > " only ever appear as
+    // entities — every tag this inserts is a hardcoded literal (<sup>,
+    // <sub>, <div class="math-block">), never built from matched text, so it
+    // can't reintroduce XSS.
+    const MATH_DROPPED_UNDERSCORE = {
+        dmodel: 'd_model', dhead: 'd_head', dff: 'd_ff',
+        dk: 'd_k', dv: 'd_v', dq: 'd_q',
+    };
+    const MATH_SUB_STOP_WORDS = new Set([
+        'train', 'test', 'val', 'data', 'config', 'file',
+        'name', 'id', 'key', 'value', 'url', 'path', 'dev', 'prod',
+    ]);
+    const MATH_BLOCK_WORD_WHITELIST = new Set([
+        'sin', 'cos', 'tan', 'log', 'exp', 'lim', 'max', 'min',
+        'argmax', 'softmax', 'sqrt', 'var', 'std', 'dmodel', 'dhead', 'dff',
+    ]);
+    const MATH_FUNC_EQ_RE = /^[A-Za-z][A-Za-z0-9]{0,20}(_[A-Za-z0-9{}()]+)?\s*\([^()\n]{0,80}\)\s*=\s*\S/;
+    const MATH_SIGNAL_RE = /[=≈≤≥±∑∫√×÷∂∇∈∉⊂⊆∀∃→↦^_πθαβγδεζηκλμνξρστφχψω]/i;
+    const MATH_SUP_INNER_RE = /^(?:[A-Za-z0-9+\-*/., πθαβγδ√∑]|<\/?su[bp]>)*$/;
+
+    function isMathBlockLine(line) {
+        const t = line.trim();
+        if (!t) return false;
+        if ((t.match(/\|/g) || []).length >= 2) return false; // markdown table row
+        if (/^\(?page\s+\d+\)?[.:]?$/i.test(t)) return false; // bare "(Page 3)" citation
+        if (/^\[\d+\]\.?$/.test(t)) return false;             // bare "[3]" footnote marker
+        if (MATH_FUNC_EQ_RE.test(t)) return true;
+
+        if (!t.includes('=') || t.length > 200) return false;
+        if (!MATH_SIGNAL_RE.test(t)) return false;
+        const wordTokens = t.match(/[A-Za-z]{4,}/g) || [];
+        const looksLikeProse = wordTokens.some(w => !MATH_BLOCK_WORD_WHITELIST.has(w.toLowerCase()));
+        return !looksLikeProse;
+    }
+
+    function convertSuperscripts(line) {
+        let out = '', i = 0;
+        const validBase = (s, idx) =>
+            /[A-Za-z0-9)\]]/.test(s[idx - 1] || '') ||
+            s.slice(idx - 6, idx) === '</sub>' || s.slice(idx - 6, idx) === '</sup>';
+        while (i < line.length) {
+            if (line[i] === '^' && validBase(line, i)) {
+                if (line[i + 1] === '(') {
+                    let depth = 1, j = i + 2;
+                    while (j < line.length && depth > 0) {
+                        if (line[j] === '(') depth++;
+                        else if (line[j] === ')') depth--;
+                        j++;
+                    }
+                    const inner = line.slice(i + 2, j - 1);
+                    if (depth === 0 && inner.length <= 40 && MATH_SUP_INNER_RE.test(inner)) {
+                        out += `<sup>${inner}</sup>`;
+                        i = j;
+                        continue;
+                    }
+                } else {
+                    const m = /^[A-Za-z0-9]{1,6}/.exec(line.slice(i + 1));
+                    if (m) {
+                        out += `<sup>${m[0]}</sup>`;
+                        i += 1 + m[0].length;
+                        continue;
+                    }
+                }
+            }
+            out += line[i];
+            i++;
+        }
+        return out;
+    }
+
+    function formatInlineMath(line) {
+        line = line.replace(/\b(dmodel|dhead|dff|dk|dv|dq)\b/g, w => MATH_DROPPED_UNDERSCORE[w]);
+        line = line.replace(/\b([A-Za-zθαβγδφψω]{1,2})_(\{[^{}]{1,20}\}|[A-Za-z0-9]{1,10})\b/g, (m, base, sub) => {
+            const clean = sub.replace(/^\{|\}$/g, '');
+            if (MATH_SUB_STOP_WORDS.has(clean.toLowerCase())) return m;
+            return `${base}<sub>${clean}</sub>`;
+        });
+        return convertSuperscripts(line);
+    }
+
+    // Gemini sometimes writes literal <sub>/<sup> tags itself (rather than
+    // ASCII ^/_) when asked to preserve notation, and escapeHtml() correctly
+    // neutralizes those into visible &lt;sub&gt; entities. Restore only this
+    // exact closed, attribute-free vocabulary — it can't carry onclick/src/etc,
+    // so this can't reopen an XSS hole the way un-escaping an arbitrary tag would.
+    function restoreSafeMathTags(text) {
+        return text
+            .replace(/&lt;sup&gt;/g, '<sup>')
+            .replace(/&lt;\/sup&gt;/g, '</sup>')
+            .replace(/&lt;sub&gt;/g, '<sub>')
+            .replace(/&lt;\/sub&gt;/g, '</sub>');
+    }
+
+    function formatMathAnswer(text) {
+        text = restoreSafeMathTags(text);
+        return text.split('\n').map(line => {
+            if (isMathBlockLine(line)) {
+                return `<div class="math-block">${formatInlineMath(line.trim())}</div>`;
+            }
+            return formatInlineMath(line);
+        }).join('\n');
+    }
+
     function clearChat() {
         const messages = document.getElementById('chat-messages');
         messages.innerHTML = '';
@@ -714,7 +837,7 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             const statsLine = `<div class="token-line">🔍 ${chunksFound} chunks &nbsp;&middot;&nbsp; 📋 ${escapeHtml(tableUsed)} &nbsp;&middot;&nbsp; ⚙️ ${escapeHtml(searchMethod)}</div>`;
 
             appendBubble(
-                `<div class="ai-answer-text">${escapeHtml(data.answer || '')}</div>${sourcesHtml}${statsLine}${tokenLine}`,
+                `<div class="ai-answer-text">${formatMathAnswer(escapeHtml(data.answer || ''))}</div>${sourcesHtml}${statsLine}${tokenLine}`,
                 'ai-bubble'
             );
         } catch (err) {
@@ -790,8 +913,9 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
         return sel.value;
     }
 
-    // Documents are listed from the ingestion status table, so one still being
-    // parsed shows up disabled with its stage rather than silently missing.
+    // Only successfully embedded documents appear in the query dropdown.
+    // In-progress and failed documents are filtered out here rather than at
+    // the endpoint so the API remains useful for management/admin views.
     async function loadDomainDocuments() {
         const sel = document.getElementById('chat-document');
         const domain = document.getElementById('chat-domain').value;
@@ -801,12 +925,10 @@ h2 { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.35); margin-bottom: 15p
             const res = await fetch(`/domains/${encodeURIComponent(domain)}/documents`);
             if (!res.ok) return;
             const data = await res.json();
-            const docs = data.documents || [];
+            const docs = (data.documents || []).filter(d => d.stage === 'embedded');
             sel.innerHTML += docs.map(d => {
                 const name = d.doc_name || d.file_name;
-                const ready = d.stage === 'embedded';
-                const suffix = ready ? ` (${d.chunk_count || 0})` : ` — (${d.stage})`;
-                return `<option value="${escapeHtml(d.document_id)}"${ready ? '' : ' disabled'}>${escapeHtml(name)}${suffix}</option>`;
+                return `<option value="${escapeHtml(d.document_id)}">${escapeHtml(name)} (${d.chunk_count || 0})</option>`;
             }).join('');
         } catch (_) { /* leave the "all documents" default in place */ }
     }

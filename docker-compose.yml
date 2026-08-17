@@ -48,7 +48,12 @@ x-common-env: &common-env
   # slower cores — expect a sub-linear gain. Revert to 4 if the measured
   # `Converted pages ... rate=Xs/page` on the same document does not improve.
   DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-6}
-  DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-50}
+  # 40, down from 50. Docling holds a rendered image for EVERY page in the batch
+  # (generate_page_images at images_scale 2.0, ~5.2MB/page) from convert() until
+  # the batch is released, so this number is the parse's working set: ~260MB at
+  # 50, ~208MB at 40. It is the smaller half of the OOM fix — the larger half is
+  # MALLOC_ARENA_MAX below.
+  DOCLING_PAGE_BATCH_SIZE: ${DOCLING_PAGE_BATCH_SIZE:-40}
   DOCLING_TABLEFORMER_MODE: ${DOCLING_TABLEFORMER_MODE:-fast}
   # 1, not 2: Ollama runs on the same host and serializes on one GPU. Measured
   # on an M1 — 3.87s/call at 1, 4.93s at 2, 20.62s at 4.
@@ -76,6 +81,18 @@ x-common-env: &common-env
   # torch.compile path (torchvision NMS in docling's layout pass) dies with
   # InvalidCxxCompiler. Nothing calls torch.compile, so eager execution is free.
   TORCHDYNAMO_DISABLE: "1"
+
+  # ── glibc allocator ──
+  # A 702-page parse was OOM-killed with RSS climbing +357, +321, +239, +314MB
+  # across its first five batches and never falling, even though `del doc` runs
+  # per batch and test_pdf_parser_streaming proves no DoclingDocument survives.
+  # The blocks go back to glibc, not to the kernel. Default MALLOC_ARENA_MAX is
+  # 8*NCPU, so docling's 6 threads can each strand freed pages in their own
+  # arena; 2 caps that. TRIM_THRESHOLD_ makes free() itself return memory rather
+  # than waiting for the explicit malloc_trim in _release_freed_memory().
+  # No effect on macOS/musl, which have neither the arenas nor malloc_trim.
+  MALLOC_ARENA_MAX: "2"
+  MALLOC_TRIM_THRESHOLD_: "131072"
 
 # Only the services that run docling and download its weights.
 x-hf-env: &hf-env
@@ -291,14 +308,16 @@ services:
           # 6.0, up from 4.0: the VM has 6 CPUs and docling was capped below it.
           # Paired with DOCLING_NUM_THREADS 6.
           cpus: "6.0"
-          # 3.5G, and do not lower it — this has a measured floor. A 504-page
-          # parse was OOM-killed (signal 9) on its final batch at 2.5G, RSS
-          # climbing 1589MB -> 1850MB across nine batches, with a survived run
-          # peaking at 1979MB. Anything between 2.5G and 3.5G is unmeasured;
-          # 3.5G is the only value observed to hold. celery_worker_ingestion
-          # sits at 3G only because the 6.77G VM cannot fund 3.5G twice — two
-          # simultaneous large parses remain the case that exhausts it.
-          memory: 3.5G
+          # 4G, and do not lower it. This limit has been raised twice by an OOM
+          # kill, and each time the earlier "measured floor" turned out to be
+          # measured against one document rather than against the parser: 2.5G
+          # died on a 504-page PDF, then 3.5G held that one at 3097MB (86%) and
+          # died on a 702-page one at batch 8 of 15. Peak scales with total
+          # pages, not batch size, until _release_freed_memory() proves
+          # otherwise — see docs/20260814_parse_oom_and_allocator_ratchet.md.
+          # celery_worker_ingestion is 4G too; see the note there on the
+          # resulting VM overcommit.
+          memory: 4G
         reservations:
           cpus: "0.5"
           memory: 512M
@@ -342,10 +361,21 @@ services:
         limits:
           # See celery_worker_upload — same image, same docling pipeline.
           cpus: "6.0"
-          # 3G, raised from 2.5G: that was exactly the ceiling that OOM-killed a
-          # 504-page parse on celery_worker_upload, and this worker runs the
-          # same pipeline with no evidence it would not hit the same wall.
-          memory: 3G
+          # 4G, matching celery_worker_upload, because the same documents reach
+          # both: `upload` from the API, `ingestion` from recover_and_dispatch
+          # and the weekly scan (_dispatch_pending hardcodes INGESTION_QUEUE).
+          # Sizing them differently only means the recovery path OOM-kills a
+          # document the interactive path survives — and recovery is the path
+          # nobody is watching. This was 3G, i.e. LESS headroom than the 3.5G
+          # that already died on a 702-page book.
+          #
+          # Worker ceilings now sum to 8G against a 6.77G VM. Limits are
+          # ceilings, not reservations, and the two workers are rarely both
+          # parsing, so this costs nothing until they are. If it does bite,
+          # scale this service to 0 for the duration of a large interactive
+          # upload — do not shrink the limit back, because a 3G worker is a
+          # worker that cannot parse a large book at all.
+          memory: 4G
         reservations:
           memory: 512M
     command: ["sh", "-c", "trap 'kill 0' EXIT; celery -A app.worker.celery_app worker -Q ingestion --loglevel=info -c 1 --max-tasks-per-child=1 2>&1 | tee -a /app/logs/celery_worker_ingestion.log"]

@@ -26,7 +26,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from billiard.exceptions import WorkerLostError
 from celery import chain
+from celery.signals import task_failure
 
 from app.config.app_config import AppSettings
 from app.worker.celery_app import celery_app
@@ -432,6 +434,53 @@ def embed_document_task(doc_id: str) -> Dict[str, Any]:
 @celery_app.task(name="app.worker.ingestion_tasks.register_and_dispatch")
 def register_and_dispatch_task() -> Dict[str, Any]:
     return _run(_register_and_dispatch())
+
+
+# Stage each task owns, for the worker-lost handler below. Keyed by task name
+# because that is all the signal carries.
+_TASK_STAGES = {
+    "app.worker.ingestion_tasks.parse_document": "parse",
+    "app.worker.ingestion_tasks.chunk_document": "chunk",
+    "app.worker.ingestion_tasks.embed_document": "embed",
+}
+
+
+@task_failure.connect
+def _record_worker_lost(sender=None, task_id=None, exception=None, args=None, **kwargs):
+    """Mark a document errored when its worker process is killed outright.
+
+    A SIGKILL — a cgroup OOM during a large parse is the case that matters —
+    gives the child no chance to run the `except` in `_run_stage`, so the row
+    keeps `stage='parsing'` and a live claim. Recovery then needs
+    INGESTION_CLAIM_TIMEOUT_MINUTES (180) to elapse *and* the next 6-hourly
+    `recover_and_dispatch` tick: up to ~9 hours during which the document looks
+    like it is still being worked on and the retry budget is never spent.
+
+    This runs in MainProcess, which outlives the child and is the only place the
+    kill is observable. It deliberately handles nothing but `WorkerLostError`:
+    an ordinary exception already reached `_run_stage`, and recording it twice
+    would burn two attempts for one failure.
+    """
+    if not isinstance(exception, WorkerLostError):
+        return
+
+    stage = _TASK_STAGES.get(getattr(sender, "name", ""))
+    doc_id = args[0] if args else None
+    if stage is None or not doc_id:
+        return
+
+    logger.error(
+        "Worker lost during stage %s for %s (task %s): %s",
+        stage, doc_id, task_id, exception,
+    )
+    try:
+        config = _get_config()
+        repo = _get_repo(config)
+        _run(repo.record_error(doc_id, f"worker lost: {exception}", MAX_ATTEMPTS, stage=stage))
+    except Exception:
+        # The handler is best-effort: the stale sweep is still the backstop, and
+        # raising here would replace a useful log line with a confusing one.
+        logger.exception("Could not record worker-lost failure for %s", doc_id)
 
 
 @celery_app.task(name="app.worker.ingestion_tasks.recover_and_dispatch")

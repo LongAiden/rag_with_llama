@@ -103,8 +103,14 @@ class TableStructurePreserver(TextCleaningStrategy):
         text = re.sub(r'[─━═]', '-', text)     # Horizontal lines
         text = re.sub(r'[┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬]', '+', text)  # Corners and intersections
 
-        # Preserve cells by ensuring spaces around pipe symbols
-        text = re.sub(r'\s*\|\s*', ' | ', text)
+        # Preserve cells by ensuring spaces around pipe symbols — but only on
+        # lines that look like table rows (start and end with |). Rewriting
+        # every pipe in the document mangles |x| and ‖v‖ in prose.
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if re.match(r'^\s*\|.*\|\s*$', line):
+                lines[i] = re.sub(r'\s*\|\s*', ' | ', line)
+        text = '\n'.join(lines)
 
         # Clean up excessive separators
         text = re.sub(r'-{4,}', '----', text)
@@ -131,12 +137,6 @@ class SpecialSymbolNormalizer(TextCleaningStrategy):
 
         # Bullets
         '•': '*', '◦': '-', '▪': '*', '▫': '-',
-
-        # Currency (keep common ones, remove obscure)
-        '€': 'EUR', '£': 'GBP', '¥': 'YEN',
-
-        # Fractions
-        '½': '1/2', '⅓': '1/3', '¼': '1/4', '¾': '3/4',
     }
 
     def clean(self, text: str) -> str:
@@ -211,24 +211,30 @@ class TextCleaningPipeline:
     Applies multiple cleaning strategies in sequence.
     """
 
-    def __init__(self, strategies: Optional[List[TextCleaningStrategy]] = None):
+    def __init__(self, strategies: Optional[List[TextCleaningStrategy]] = None,
+                 preserve_math: bool = True):
         """
         Initialize the cleaning pipeline.
 
         Args:
             strategies: List of cleaning strategies to apply in order.
                        If None, uses default pipeline.
+            preserve_math: If True (default), math symbols, Greek letters and
+                          superscripts pass through untouched. If False, the
+                          legacy MathNotationNormalizer transliterates them
+                          into ASCII words (∑ → "sum", α → "alpha").
         """
         if strategies is None:
             # Default pipeline for RAG system
             self.strategies = [
                 SurrogateRemovalStrategy(),
-                UnicodeNormalizer('NFKC'),
-                MathNotationNormalizer(),
+                UnicodeNormalizer('NFC'),
                 TableStructurePreserver(),
                 SpecialSymbolNormalizer(),
                 WhitespaceNormalizer(),
             ]
+            if not preserve_math:
+                self.strategies.insert(2, MathNotationNormalizer())
         else:
             self.strategies = strategies
 
