@@ -76,6 +76,20 @@ def get_reranker(config) -> Reranker:
             # From AppSettings, not os.getenv: pydantic-settings also reads .env,
             # which a bare os.getenv would silently ignore.
             rerank_model = config.settings.rerank_model
-            config.reranker = Reranker(model_name=rerank_model)
+            config.reranker = Reranker(
+                model_name=rerank_model,
+                max_length=config.settings.rerank_max_length,
+            )
             print(f"✓ Reranker initialized with model: {rerank_model}")
     return config.reranker
+
+
+def preload_reranker(config) -> None:
+    """Eagerly construct the cross-encoder. Call from app startup in a thread.
+
+    Thin wrapper around get_reranker: the lock inside get_reranker already
+    serialises first construction, so no extra guard is needed here. The
+    preload_reranker setting is checked by the caller (app.py lifespan), not
+    here — this function is a plain "do it now" primitive.
+    """
+    get_reranker(config)

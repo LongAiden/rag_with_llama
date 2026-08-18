@@ -136,6 +136,12 @@ def config():
         connection_string="postgresql://u:p@localhost:5432/db",
         reranker=None,
         pipeline=None,
+        settings=SimpleNamespace(
+            vector_search_limit=20,
+            rerank_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+            rerank_max_length=256,
+            rerank_top_k=5,
+        ),
     )
 
 

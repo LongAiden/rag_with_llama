@@ -4,7 +4,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, Form, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
-from app.api.dependencies import get_config, get_pipeline_factory
+from app.api.dependencies import config, get_config, get_pipeline_factory
 from app.api.renderer import render
 from app.api.validators import require_access_password, validate_table_name
 from app.config.app_config import DEFAULT_TABLE_NAME
@@ -81,7 +81,7 @@ async def _execute_traced_search(
     config,
     get_pipeline,
     enable_reranking: bool = True,
-    rerank_top_k: int = 5,
+    rerank_top_k: int = config.settings.rerank_top_k,
     search_mode: str = "vector",
 ) -> RAGResponse:
     """Shared search logic used by both JSON and form endpoints.
@@ -146,7 +146,7 @@ async def query_documents(
                 config=config,
                 get_pipeline=get_pipeline,
                 enable_reranking=request.enable_reranking,
-                rerank_top_k=request.rerank_top_k or 5,
+                rerank_top_k=request.rerank_top_k or config.settings.rerank_top_k,
                 search_mode=request.search_mode,
             )
 
@@ -193,7 +193,7 @@ async def query_documents_form(
                 config=config,
                 get_pipeline=get_pipeline,
                 enable_reranking=True,
-                rerank_top_k=5,
+                rerank_top_k=config.settings.rerank_top_k,
                 search_mode=search_mode,
             )
 

@@ -77,6 +77,23 @@ x-common-env: &common-env
   VLM_IMAGES_SCALE: ${VLM_IMAGES_SCALE:-2.0}
   VLM_MIN_IMAGE_SHORT_PT: ${VLM_MIN_IMAGE_SHORT_PT:-107}
 
+  # ── Retrieval & reranking (read by the app service) ──
+  # RERANK_MODEL was previously NOT passed through here, so the RERANK_MODEL=
+  # line in .env.example never reached the container — anyone who set it was
+  # silently running the pydantic default. Adding it here fixes that.
+  RERANK_MODEL: ${RERANK_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+  # Cross-encoder input truncation. 256 halves per-pair cost vs the model's
+  # 512 default while still scoring every candidate. See
+  # docs/plans/20260818_retrieval_speed_vector_rerank.md Step 1.
+  RERANK_MAX_LENGTH: ${RERANK_MAX_LENGTH:-256}
+  # Candidates pgvector returns before reranking. Lowering is a recall
+  # tradeoff, not a free win — see plan Step 4.
+  VECTOR_SEARCH_LIMIT: ${VECTOR_SEARCH_LIMIT:-20}
+  # Final top-k after cross-encoder reranking.
+  RERANK_TOP_K: ${RERANK_TOP_K:-5}
+  # Eagerly load the cross-encoder on app startup.
+  PRELOAD_RERANKER: ${PRELOAD_RERANKER:-true}
+
   # The runtime image ships without a compiler by design, so a downstream
   # torch.compile path (torchvision NMS in docling's layout pass) dies with
   # InvalidCxxCompiler. Nothing calls torch.compile, so eager execution is free.
@@ -261,6 +278,16 @@ services:
           memory: 384M
     environment:
       <<: *common-env
+      # Torch sizes its intra-op pool from os.cpu_count(), which reports the
+      # Docker VM's 6 CPUs, while limits.cpus below caps this container at 1.0.
+      # Six threads against a 1.0 CFS quota burn the period in ~16ms and then
+      # sit throttled, paying a 6-way barrier per GEMM. Measured symptom:
+      # 45ms/pair on a 6-layer MiniLM cross-encoder that should cost 12-15ms.
+      # Keep this equal to limits.cpus. Not in x-common-env: the parse workers
+      # are deliberately allowed 6 threads (DOCLING_NUM_THREADS: 6).
+      OMP_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
+      MKL_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
+      OPENBLAS_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
       LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
       LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
       # Langfuse observability (optional — leave blank to disable)

@@ -75,13 +75,18 @@ RUN useradd -m -u 1000 appuser && \
     mkdir -p /home/appuser/.cache/huggingface /home/appuser/.cache/sentence_transformers && \
     chown -R appuser:appuser /home/appuser/.cache /app
 
-# Pre-download the default embedding model so workers don't have to fetch it
-# on first task. This avoids the runtime memory spike and cold-start latency.
+# Pre-download the default embedding and reranker models so neither workers nor
+# the app have to fetch them on first use. This avoids the runtime memory spike
+# and cold-start latency. The reranker is baked here (not in an hf_cache volume)
+# because the app container does not mount hf_cache — only the celery workers do
+# — so without this it would land in the writable layer and be re-fetched on
+# every --force-recreate.
 USER appuser
 RUN python - <<'PY'
-from sentence_transformers import SentenceTransformer
-from app.config.app_config import DEFAULT_EMBEDDING_MODEL
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from app.config.app_config import DEFAULT_EMBEDDING_MODEL, AppSettings
 SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+CrossEncoder(AppSettings().rerank_model)
 PY
 
 EXPOSE 8000

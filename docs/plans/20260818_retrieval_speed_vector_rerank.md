@@ -1,7 +1,8 @@
 # Plan — cutting retrieval latency for vector search + cross-encoder rerank (CPU/Docker)
 
 **Date**: 2026-08-18
-**Status**: plan. Nothing here is applied.
+**Status**: Phases 0-3 implemented (commit pending). Phase 4 remains gated on
+the post-Phase-0 measurement and ships env-only. See [§ Changelog](#changelog).
 **Revision**: v2 — reordered after a code audit. v1 led with the two levers that cost retrieval
 quality (smaller model, fewer candidates) and missed the free one (thread caps). See
 [§ Changelog](#changelog).

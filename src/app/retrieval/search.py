@@ -49,7 +49,8 @@ async def perform_document_search(
 
     Args:
         query: Search query string
-        limit: Maximum number of results to return
+        limit: Maximum results on the non-reranked path. Ignored when
+            enable_reranking=True — rerank_top_k controls the final count.
         threshold: Similarity threshold for filtering results
         pipeline: ChunkEmbeddingPipeline instance
         config: Application configuration object
@@ -73,7 +74,15 @@ async def perform_document_search(
                      table_name=table_name,
                      search_mode=search_mode):
 
-        HYBRID_LIMIT = 20
+        # Candidate depth for the reranker. Guarded because rerank_top_k slices
+        # AFTER predict(): a depth below top_k would silently return fewer than
+        # the caller asked for.
+        candidate_depth = max(config.settings.vector_search_limit, rerank_top_k)
+        logfire.info("Retrieval knobs",
+                     candidate_depth=candidate_depth,
+                     rerank_top_k=rerank_top_k,
+                     rerank_model=config.settings.rerank_model,
+                     rerank_max_length=config.settings.rerank_max_length)
         with logfire.span("embedding_generation_for_search"):
             logfire.info("Generating embeddings for search query",
                         query_length=len(query),
@@ -81,7 +90,7 @@ async def perform_document_search(
 
             vector_results = await pipeline.search_documents(
                 query=query,
-                limit=HYBRID_LIMIT,
+                limit=candidate_depth,
                 threshold=threshold,
                 document_ids=document_ids
             )
@@ -94,7 +103,7 @@ async def perform_document_search(
             with logfire.span("bm25_retrieval"):
                 bm25_results = await pipeline.vector_store.search_bm25(
                     query=query,
-                    limit=HYBRID_LIMIT,
+                    limit=candidate_depth,
                     document_ids=document_ids,
                 )
                 logfire.info("BM25 search completed", results_found=len(bm25_results))

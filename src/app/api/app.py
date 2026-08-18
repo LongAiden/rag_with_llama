@@ -16,10 +16,15 @@ once with a decorator there and once as a wrapper here — with only the wrapper
 reachable, so adding a route the obvious way silently 404'd.
 """
 
+import asyncio
+from contextlib import asynccontextmanager
+
+import logfire
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dependencies import config
+from app.retrieval.utils import preload_reranker
 from app.api.routes import (
     admin_routes,
     document_routes,
@@ -29,8 +34,24 @@ from app.api.routes import (
     table_routes,
 )
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Eagerly load the cross-encoder so the first /query is not penalised by a
+    # multi-second model load. Baked weights (Dockerfile pre-warm) make this a
+    # ~1-3s disk load. Wrapped in try/except because Reranker.__init__ re-raises
+    # and search.py already degrades to vector-only scores on a reranker failure
+    # — an unguarded raise here would turn that soft fallback into a boot loop.
+    if config.settings.preload_reranker:
+        try:
+            await asyncio.to_thread(preload_reranker, config)
+        except Exception as e:
+            logfire.error("Reranker preload failed; falling back to lazy load",
+                          error=str(e))
+    yield
+
+
 # Initialize FastAPI application
-app = FastAPI(title="pgvector RAG API", version="1.0.0")
+app = FastAPI(title="pgvector RAG API", version="1.0.0", lifespan=lifespan)
 app.mount("/images", StaticFiles(directory="docs/images"), name="images")
 
 observability_routes.set_connection_string(config.connection_string)

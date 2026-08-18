@@ -37,7 +37,11 @@ class Reranker:
     relevance scores than bi-encoder similarity alone.
     """
 
-    def __init__(self, model_name: str = 'cross-encoder/ms-marco-MiniLM-L-6-v2'):
+    def __init__(
+        self,
+        model_name: str = 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        max_length: int = 256,
+    ):
         """
         Initialize reranker with a cross-encoder model.
 
@@ -46,12 +50,16 @@ class Reranker:
                 - 'cross-encoder/ms-marco-MiniLM-L-6-v2' (fast, good quality)
                 - 'cross-encoder/ms-marco-MiniLM-L-12-v2' (slower, better quality)
                 - 'cross-encoder/ms-marco-TinyBERT-L-2-v2' (fastest, lower quality)
+            max_length: Max token length per query↔chunk pair. Chunks target
+                DEFAULT_CHUNK_SIZE=512 and the model default is 512, so pairs run
+                at the ceiling where attention cost is quadratic. 256 roughly
+                halves per-pair cost while still scoring every candidate.
         """
         self.model_name = model_name
-        logfire.info("Initializing reranker", model_name=model_name)
+        logfire.info("Initializing reranker", model_name=model_name, max_length=max_length)
 
         try:
-            self.model = CrossEncoder(model_name)
+            self.model = CrossEncoder(model_name, max_length=max_length)
             logfire.info("Reranker initialized successfully", model_name=model_name)
         except Exception as e:
             logfire.error("Failed to initialize reranker",

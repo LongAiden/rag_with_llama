@@ -79,6 +79,21 @@ class AppSettings(BaseSettings):
     # Embedding
     embedding_model: str = Field(default=DEFAULT_EMBEDDING_MODEL)
     rerank_model: str = Field(default='cross-encoder/ms-marco-MiniLM-L-6-v2', validation_alias='RERANK_MODEL')
+    # Cross-encoder input truncation. Chunks target DEFAULT_CHUNK_SIZE=512 tokens
+    # and the model's own max_length is 512, so pairs run at the ceiling where
+    # attention cost is quadratic. 256 roughly halves per-pair cost while the
+    # reranker still SEES every candidate — unlike cutting vector_search_limit,
+    # which removes candidates from consideration entirely.
+    rerank_max_length: int = Field(default=256, validation_alias='RERANK_MAX_LENGTH')
+    # Candidates pgvector returns before reranking. Was hardcoded HYBRID_LIMIT=20
+    # in retrieval/search.py. Kept at 20: lowering it is a recall tradeoff, not a
+    # free win — see docs/plans/20260818_retrieval_speed_vector_rerank.md Step 4.
+    vector_search_limit: int = Field(default=20, validation_alias='VECTOR_SEARCH_LIMIT')
+    # Final top-k after cross-encoder reranking. Was three literals in query_routes.py.
+    rerank_top_k: int = Field(default=5, validation_alias='RERANK_TOP_K')
+    # Eagerly load the cross-encoder on FastAPI startup so the first /query does
+    # not pay the model-load hit. See app/api/app.py lifespan.
+    preload_reranker: bool = Field(default=True, validation_alias='PRELOAD_RERANKER')
 
     # Table
     table_name: str = Field(default=DEFAULT_TABLE_NAME, validation_alias='DEFAULT_TABLE_NAME')
