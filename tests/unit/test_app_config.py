@@ -88,6 +88,45 @@ class TestAppSettings:
             assert settings.logfire_write_token == 'test-token'
 
 
+class TestConfigureLogfire:
+    """Logfire is optional — a failed configure must never crash AppConfig.
+
+    Regression for the chunk-stage crash where a worker without
+    LOGFIRE_WRITE_TOKEN and without local ``~/.logfire`` auth raised
+    LogfireConfigError out of ``AppConfig.__init__``, killing the task.
+    """
+
+    def test_no_token_configure_raises_does_not_crash(self):
+        """No token + logfire.configure() raises → AppConfig still constructs."""
+        from logfire.exceptions import LogfireConfigError
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("app.config.app_config.logfire.configure",
+                       side_effect=LogfireConfigError("no config")):
+                from app.config.app_config import AppConfig
+                config = AppConfig()  # must not raise
+                assert config.settings.logfire_write_token is None
+
+    def test_bad_token_configure_raises_does_not_crash(self):
+        """Token set but configure fails → AppConfig still constructs."""
+        from logfire.exceptions import LogfireConfigError
+
+        with patch.dict(os.environ, {'LOGFIRE_WRITE_TOKEN': 'bad-token'}, clear=True):
+            with patch("app.config.app_config.logfire.configure",
+                       side_effect=LogfireConfigError("bad token")):
+                from app.config.app_config import AppConfig
+                config = AppConfig()  # must not raise
+                assert config.settings.logfire_write_token == 'bad-token'
+
+    def test_configure_succeeds_no_token(self):
+        """No token + configure succeeds (local auth) → normal path."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("app.config.app_config.logfire.configure") as mock_cfg:
+                from app.config.app_config import AppConfig
+                AppConfig()
+                mock_cfg.assert_called_once_with()
+
+
 class TestGetOllamaModel:
     """Test the get_ollama_model function."""
 

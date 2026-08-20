@@ -694,7 +694,7 @@ docker exec -it rag_redis redis-cli
 set -a && source .env && set +a
 
 # Recent documents and their stages
-docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+docker compose exec -T postgres psql -U admin -d rag_db \
   -c "SELECT id, file_name, stage, attempts, claimed_at, last_error FROM documents ORDER BY created_at DESC LIMIT 10;"
 
 # Documents stuck in a processing stage (likely OOM-killed worker)

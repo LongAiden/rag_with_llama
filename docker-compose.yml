@@ -26,6 +26,14 @@ x-common-env: &common-env
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
   GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
 
+  # Logfire observability (optional — blank disables; a configure failure is
+  # caught in AppConfig._configure_logfire and never crashes the service).
+  # In x-common-env so the workers and beat receive it too: they otherwise rely
+  # on the /app/.env mount, while the app service got it via the environment
+  # block, so the two could diverge after a .env edit without a restart.
+  LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
+  LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
+
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
   CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
@@ -288,8 +296,6 @@ services:
       OMP_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
       MKL_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
       OPENBLAS_NUM_THREADS: ${APP_OMP_NUM_THREADS:-1}
-      LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
-      LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
       # Langfuse observability (optional — leave blank to disable)
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
@@ -572,8 +578,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      LOGFIRE_WRITE_TOKEN: ${LOGFIRE_WRITE_TOKEN:-}
-      LOGFIRE_READ_TOKEN: ${LOGFIRE_READ_TOKEN:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       PYTHONPATH: /app
     volumes:

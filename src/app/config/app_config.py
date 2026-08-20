@@ -206,13 +206,26 @@ class AppConfig:
         return f"postgresql://{p.user}:{p.password}@{p.host}:{p.port}/{p.dbname}"
 
     def _configure_logfire(self):
-        """Configure logfire with token from settings."""
-        if self.settings.logfire_write_token:
-            logfire.configure(token=self.settings.logfire_write_token)
-            logger.info("Logfire configured successfully")
-        else:
-            logger.warning("LOGFIRE_WRITE_TOKEN not found, using default configuration")
-            logfire.configure()
+        """Configure logfire with token from settings.
+
+        Logfire is optional observability — a missing token or failed configure
+        must never crash the app or worker. Without a token we still try
+        ``logfire.configure()`` to pick up local ``~/.logfire`` auth (from
+        ``uv run logfire auth``); if that also fails we disable logfire and
+        continue. See ARCHITECTURE.md §7.
+        """
+        token = self.settings.logfire_write_token
+        try:
+            if token:
+                logfire.configure(token=token)
+                logger.info("Logfire configured successfully")
+            else:
+                logger.warning("LOGFIRE_WRITE_TOKEN not found, using default configuration")
+                logfire.configure()
+        except Exception as exc:
+            level = logger.error if token else logger.warning
+            level("Logfire configure failed (token=%s); observability disabled: %s",
+                  "set" if token else "unset", exc)
 
 
 def get_ollama_model() -> str:
